@@ -1,0 +1,157 @@
+# pane-comms — cross-pane & cross-tab communication for zellij
+
+Let panes (and tabs) exchange data directly: any pane can send input to any other pane, read
+any other pane, and join named channels — **without forking zellij**. Three artifacts in this
+directory, running on stock zellij:
+
+1. **`hub/`** — `hub.wasm`, a normal zellij plugin (the only always-on component). Holds named
+   channels and in-flight `ask` waits inside the session's server.
+2. **`pz/`** — companion CLI. Every invocation is short-lived and stateless (like `git`): it
+   resolves the target, calls stock `zellij action` / `zellij pipe` / `zellij subscribe`, and
+   exits. No daemon.
+3. **`layouts/` + `tests/`** — a test session layout and the end-to-end suite.
+
+Model: herdr's socket API (`pane.send_text`, `pane.read`, `events.subscribe`). Design rules
+(from `../pane_comms.md`): communication is **on the ask only** — nothing is pushed unless
+something explicitly asked for it; idle cost is zero; status is self-reported, never
+output-derived (M5, deferred).
+
+## Build
+
+Requires the `wasm32-wasip1` Rust target (`rustup target add wasm32-wasip1`, or Arch:
+`sudo pacman -S rust-wasm`).
+
+```sh
+cargo build -p hub --target wasm32-wasip1 --release   # -> hub/target/wasm32-wasip1/release/hub.wasm
+cargo build -p pz                                      # -> target/debug/pz
+```
+
+The hub is pinned to `zellij-tile = "=0.44.3"` (matches zellij 0.44.x, the tested floor).
+Pipes require zellij ≥ 0.40.
+
+## Load the hub + grant permissions
+
+The hub requests `ReadCliPipes`, `WriteToStdin`, `ReadPaneContents`. Grant them per session by
+pre-seeding the permissions cache (avoids the UI prompt; zellij reads
+`~/.cache/zellij/permissions.kdl` — or `$XDG_CACHE_HOME/zellij/permissions.kdl`). Keys are the
+plugin's stored location — the plain path for file URLs, not the `file://` form:
+
+```kdl
+"/abs/path/hub.wasm" {
+    ReadCliPipes
+    WriteToStdin
+    ReadPaneContents
+}
+```
+
+Load it (once per session) with a keybind, a layout `run_plugin`, or:
+
+```sh
+zellij action start-or-reload-plugin file:///abs/path/hub.wasm
+```
+
+`pz` also launches the hub on demand the first time a `pz ask/listen/status/send --channel`
+command runs (`zellij pipe --plugin ...` auto-launches the plugin), so pre-loading is optional.
+
+## Usage
+
+```
+pz send <target> <text...>             # write into a pane's stdin (cross-tab)
+pz send --channel <name> <text...>     # broadcast to all listeners of a channel
+pz ask <target> <prompt...> [--timeout N]   # prompt, block until the pane prints new output
+pz wait <target> --until <pat> [--timeout N]  # block until output matches (substring or /regex/)
+pz listen <channel> [--format raw|json]  # stream a channel (Ctrl-C stops)
+pz status <target>                     # one-shot pane status (title/focused/exited)
+pz targets [--json]                    # list panes with tab ids/names
+```
+
+Targets: `terminal_2` | `plugin_1` | `3` (bare == `terminal_3`) | `tab:3` | `tab-name:work`
+(first match wins; tab names are not unique) | `active` (the single focused pane).
+
+Session: `$ZELLIJ_SESSION_NAME` (inside zellij), else the single active `zellij ls` session,
+else `--session <name>`.
+
+Hub location: `$PZ_HUB_URL`, else auto-discovered next to the `pz` binary.
+
+### Exit codes (contract)
+
+| code | meaning |
+|---|---|
+| 0 | success |
+| 1 | session resolution failure; `wait` timeout / pane closed; `listen` ended |
+| 2 | bad or missing target; zellij command failed |
+| 3 | `ask` timed out |
+| 4 | `status` target unknown |
+
+### Cross-tab
+
+Pane ids are globally unique across tabs, so `send`/`wait`/`status` reach panes in any tab with
+no extra work. `tab:N` / `tab-name:X` are resolved client-side via
+`zellij action list-panes --json` (`tab_id`, `tab_name`, `is_focused`) before any zellij call —
+zero protocol changes.
+
+## Wire protocol (pz ⇄ hub)
+
+Requests ride `zellij pipe --plugin hub.wasm --name <n> -- <json>`. The hub answers on the
+**pipe id** (`PipeMessage.source == PipeSource::Cli(pipe_id)`, the UUID the CLI client is
+registered under) — never on the human-readable name — via `cli_pipe_output` +
+`unblock_cli_pipe_input`, so the invoking CLI gets the reply and exits.
+
+```json
+{"cmd":"send","channel":"demo","text":"hi"}
+{"cmd":"listen","channel":"demo"}
+{"cmd":"unlisten","channel":"demo"}
+{"cmd":"ask","target":"terminal_2","prompt":"...","timeout_ms":60000}
+{"cmd":"status","target":"terminal_2"}
+{"cmd":"channels"}
+```
+
+Replies: `{"ok":true,"reply":"...","reply_type":"output"}` / `{"ok":false,"error":"..."}`
+(`error == "ask_timeout"` ⇒ exit 3). Every envelope is newline-terminated (NDJSON), so
+streaming consumers can read line-wise (`pz listen` does).
+
+`listen` acknowledges with `{"ok":true,"event":"ack","reply":"subscribed",
+"reply_type":"subscribed"}` — the `event` field marks it as internal (pz suppresses it).
+
+Channel fan-out sends `{"event":"channel","channel":"demo","payload":"hi"}` on each
+subscriber's pipe **without unblocking** — subscribers stay open and stream (`pz listen` wraps
+this as `{"event":"pipe_output","pipe_name":"demo","output":"hi"}` in json format).
+
+`ask` semantics: snapshot the target's scrollback, write the prompt, then poll every 300 ms for
+new lines (truncation-safe suffix diff). The reply contains everything the pane printed after
+the snapshot — including the echo of the prompt itself. Limitations: an app with terminal echo
+disabled, or a pane busy running a command that doesn't read stdin, never produces output, so
+`ask` times out; herdr's status-token model (M5) is the proper fix for that.
+
+## Testing
+
+```sh
+tests/e2e.sh          # full E2E on a dedicated session (never touches your other sessions)
+cargo test -p pz      # matcher/line-tracker unit tests (M4 L4)
+```
+
+E2E coverage: M1 baseline (write-chars, dump-screen round-trip, cross-tab), target resolution
+(`tab:`, `tab-name:`, missing/empty/unknown → exit 2), channels (`listen` raw+json,
+`send --channel`), `wait` (match, regex, timeout exit 1, pre-existing text never matches),
+`ask` (output reply, missing pane → 2, timeout → 3), `status` (ok, unknown → 4), `targets`.
+
+## Known limitations / open questions
+
+- **Full-screen apps** (vim, REPLs): `send` injects keystrokes into the app — same limitation
+  as herdr. Documented, not solved.
+- **Stale listeners**: if a `pz listen` client dies, its pipe registration is removed by the
+  server, but the hub keeps the subscriber until `unlisten` or session end. A fan-out to a dead
+  pipe hits the server's broadcast fallback (harmless: every other client filters by its own
+  pipe id), but subscriptions should be treated as session-scoped.
+- **`active`** is ambiguous with multiple attached clients (each has a focused pane) — `pz`
+  errors and lists candidates.
+- **Per-session state**: channels and asks live only in the hub instance of one session.
+- **Version pin**: tested against zellij 0.44.3. The plugin protocol is versioned upstream and
+  old plugins keep loading, but pin zellij in CI before running the E2E suite.
+
+## Not yet built (deferred, per pane_comms.md)
+
+- M5 agent status + prompting (`pz status` here is pane status, not agent status; agent
+  status tokens with TTLs and `zstatus`-style wrappers are M5).
+- Upstream PR candidates: `pipe --pane-id`, `listen`, `subscribe --until/--timeout`,
+  `--tab-name` — the thin client features this CLI already covers.
