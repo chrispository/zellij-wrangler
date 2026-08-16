@@ -31,16 +31,19 @@ Pipes require zellij ≥ 0.40.
 
 ## Load the hub + grant permissions
 
-The hub requests `ReadCliPipes`, `WriteToStdin`, `ReadPaneContents`. Grant them per session by
-pre-seeding the permissions cache (avoids the UI prompt; zellij reads
-`~/.cache/zellij/permissions.kdl` — or `$XDG_CACHE_HOME/zellij/permissions.kdl`). Keys are the
-plugin's stored location — the plain path for file URLs, not the `file://` form:
+The hub requests `ReadCliPipes`, `WriteToStdin`, `ReadPaneContents`, and
+`ReadApplicationState` (the last is required by `pz status`; without it the hub panics and
+every blocked pipe hangs). Grant all four per session by pre-seeding the permissions cache
+(avoids the UI prompt; zellij reads `~/.cache/zellij/permissions.kdl` — or
+`$XDG_CACHE_HOME/zellij/permissions.kdl`). Keys are the plugin's stored location — the plain
+path for file URLs, not the `file://` form:
 
 ```kdl
 "/abs/path/hub.wasm" {
     ReadCliPipes
     WriteToStdin
     ReadPaneContents
+    ReadApplicationState
 }
 ```
 
