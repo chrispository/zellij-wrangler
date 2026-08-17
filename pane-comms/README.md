@@ -53,10 +53,10 @@ Common profiles are built in, but custom wrappers can be added in
   hidden behind a shell or wrapper.
 
 ```toml
-[agents.my-codex]
+[agents.codex]
 # Executable shown in the `command` field from `pz agents --json`.
 commands = ["my-codex-wrapper"]
-# Additional name users can say; `my-codex` also works.
+# Additional name users can say; `codex` also works.
 aliases = ["backend-codex"]
 # Optional terminal-title marker.
 titles = ["Backend Codex"]

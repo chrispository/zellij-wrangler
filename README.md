@@ -43,15 +43,15 @@ Add custom profiles in `$XDG_CONFIG_HOME/pane-comms/agents.toml` or
   in the `command` field from `pz agents --json`, such as `opencode2` or
   `my-codex-wrapper`—not a shell alias.
 - `aliases` are additional names you can use when asking an agent. The profile name itself also
-  works, so this example can be addressed as `my-codex` or `backend-codex`.
+  works, so this example can be addressed as `codex` or `backend-codex`.
 - `titles` contains visible terminal-title text that identifies the agent when its command is
   hidden behind a shell or wrapper. It is optional; command matching is usually best.
 
 ```toml
-[agents.my-codex]
+[agents.codex]
 # The executable shown in the `command` field from `pz agents --json`.
 commands = ["my-codex-wrapper"]
-# Names users can say instead of the profile name `my-codex`.
+# Names users can say in addition to the profile name `codex`.
 aliases = ["backend-codex"]
 # Optional visible terminal title used to recognize the pane.
 titles = ["Backend Codex"]
