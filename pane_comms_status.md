@@ -4,7 +4,7 @@ Working state for the next session. Spec: `pane_comms.md` (§1.1 = plugin + comp
 wrappers on stock zellij, no fork). Repo root = the zellij checkout (`zellij-wrangler/`), the
 deliverable lives in `pane-comms/`.
 
-## Status: E2E suite GREEN (28/28), pz unit tests 7/7
+## Status: E2E suite GREEN (28/28), zjw unit tests 7/7
 
 All previously-open failures are fixed. The E2E now passes end-to-end on stock zellij 0.44.3.
 
@@ -29,12 +29,12 @@ All previously-open failures are fixed. The E2E now passes end-to-end on stock z
    everywhere).
 4. **Listeners never printed payloads — hub output had no newlines.** All `cli_pipe_output`
    payloads were emitted as bare JSON with no line terminator; the client writes them to
-   stdout verbatim, so `pz listen`'s `BufReader::lines()` never saw a complete line. Fix:
+   stdout verbatim, so `zjw listen`'s `BufReader::lines()` never saw a complete line. Fix:
    every hub envelope (replies, acks, fan-out, status, channels) is now newline-terminated
    (NDJSON). `hub_rpc`'s `stdout.trim()` parse is unaffected.
-5. **Listen ack leaked into `pz listen --format json`** — the ack envelope lacked the `event`
+5. **Listen ack leaked into `zjw listen --format json`** — the ack envelope lacked the `event`
    field, so the `_` arm printed it raw. Fix: hub sets `"event":"ack"` on the listen ack;
-   pz's existing `Some("ack") | Some("subscribed") => continue` arm suppresses it.
+   zjw's existing `Some("ack") | Some("subscribed") => continue` arm suppresses it.
 6. **`wait --until '/^READY-REGEX/'` timed out (E2E bug, not product bug)** — two compounding
    issues in `tests/e2e.sh`:
    - `$(printf 'echo READY-REGEX\n')` — command substitution strips the trailing newline, so
@@ -51,8 +51,8 @@ All previously-open failures are fixed. The E2E now passes end-to-end on stock z
    `stty -echo; sleep 8` first, so typed input produces no output and the ask genuinely times
    out.
 8. **`status terminal_999` exited 2, spec says 4** — `cmd_status` mapped resolve_target errors
-   to `fail(2)`; per the spec (`pz status <target>` — exit 4 unknown/expired) it now fails
-   with 4. (`pz/src/main.rs`)
+   to `fail(2)`; per the spec (`zjw status <target>` — exit 4 unknown/expired) it now fails
+   with 4. (`zjw/src/main.rs`)
 
 ## Environment (verified)
 
@@ -63,13 +63,13 @@ All previously-open failures are fixed. The E2E now passes end-to-end on stock z
 | rust | 1.97.1 system; `rust-wasm` installed |
 | Build | `cargo build -p hub --target wasm32-wasip1 --release` from `pane-comms/` |
 | Artifacts | land in `pane-comms/target/` ONLY when `CARGO_TARGET_DIR=pane-comms/target` is set — the parent repo's `.cargo/config.toml` redirects `target` to the zellij repo root otherwise |
-| Running sessions | user's `glowing-echidna` (+`adventurous-goose`) — DO NOT touch. Test sessions `pztest` / `pzdbg` (kill/delete freely) |
+| Running sessions | user's `glowing-echidna` (+`adventurous-goose`) — DO NOT touch. Test sessions `zjwtest` / `zjwdbg` (kill/delete freely) |
 
 ## What's built and verified
 
-- **`pane-comms/pz/`** — companion CLI (`send` pane+`--channel`, `ask`, `wait`, `listen`,
-  `status`, `targets`; exit codes 0/1/2/3/4 per spec §"pz CLI contract"). Builds clean; unit
-  tests 7/7 (`cargo test -p pz`).
+- **`pane-comms/zjw/`** — companion CLI (`send` pane+`--channel`, `ask`, `wait`, `listen`,
+  `status`, `targets`; exit codes 0/1/2/3/4 per spec §"zjw CLI contract"). Builds clean; unit
+  tests 7/7 (`cargo test -p zjw`).
 - **`pane-comms/hub/`** — hub plugin: channels, ask-wait (Timer-subscribed poll loop), status,
   targets, NDJSON envelopes, `block_cli_pipe_input` on listen/ask pipes. Builds to `hub.wasm`
   and loads into the 0.44.3 server.
@@ -83,9 +83,9 @@ All previously-open failures are fixed. The E2E now passes end-to-end on stock z
 
 ## Installed for real use (2026-08-16)
 
-- **`pz`** → `~/.local/bin/pz` (on PATH). Rebuilt with `default_hub_url` patched to prefer
+- **`zjw`** → `~/.local/bin/zjw` (on PATH). Rebuilt with `default_hub_url` patched to prefer
   `~/.local/share/zellij-wrangler/hub.wasm` (installed layout) before the cargo candidates;
-  `$PZ_HUB_URL` still overrides.
+  `$ZJW_HUB_URL` still overrides.
 - **`hub.wasm`** → `~/.local/share/zellij-wrangler/hub.wasm`.
 - **Permissions** pre-seeded in `~/.cache/zellij/permissions.kdl` for the installed path
   (same 4 permissions as the E2E heredoc) — hub loads without the UI prompt.
@@ -94,8 +94,8 @@ All previously-open failures are fixed. The E2E now passes end-to-end on stock z
   `~/.agents/skills/zellij-wrangler` → repo copy,
   `~/.codex/skills/zellij-wrangler` and `~/.config/opencode/skills/zellij-wrangler` →
   that. `git push` updates every installed agent.
-- **Verified live** in the user's session: `pz targets`/`status` (hub auto-launch), 
-  `dump-screen --full` reads both agent panes, `pz send --channel` → `pz listen` round-trip
+- **Verified live** in the user's session: `zjw targets`/`status` (hub auto-launch),
+  `dump-screen --full` reads both agent panes, `zjw send --channel` → `zjw listen` round-trip
   (delivered to 1 listener, exit 0).
 - **Deterministic agent glue** (skill activation alone is retrieval-based, not guaranteed):
   `~/.codex/AGENTS.md` gained a "Pane comms (zellij)" section (always loaded at startup);
@@ -117,11 +117,11 @@ up the new skill.
 cd /home/chris/Documents/zellij-wrangler/pane-comms
 export CARGO_TARGET_DIR="$PWD/target"
 cargo build -p hub --target wasm32-wasip1 --release   # -> target/wasm32-wasip1/release/hub.wasm
-cargo build -p pz                                      # -> target/debug/pz
-cargo test -p pz                                       # 7 unit tests
+cargo build -p zjw                                      # -> target/debug/zjw
+cargo test -p zjw                                       # 7 unit tests
 ./tests/e2e.sh                                         # full E2E, own session, cleans up
 ```
 
 Manual hub RPC probe (session must have the permissions file; keys are plain paths in
 `$XDG_CACHE_HOME/zellij/permissions.kdl` — the plugin's stored location, NOT the file:// URL):
-`zellij --session pztest pipe --plugin file://<abs>/hub.wasm --name dbg1 -- '{"cmd":"channels"}'`
+`zellij --session zjwtest pipe --plugin file://<abs>/hub.wasm --name dbg1 -- '{"cmd":"channels"}'`

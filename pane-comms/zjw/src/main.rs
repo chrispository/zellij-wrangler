@@ -1,6 +1,6 @@
-//! pz — pane-comms companion CLI.
+//! zjw — pane-comms companion CLI.
 //!
-//! `pz` is a thin, stateless wrapper around stock zellij commands plus the pane-comms hub
+//! `zjw` is a thin, stateless wrapper around stock zellij commands plus the pane-comms hub
 //! plugin. Every invocation resolves the target, calls `zellij action` / `zellij pipe` /
 //! `zellij subscribe`, and exits. Nothing runs in the background; the hub (inside the zellij
 //! server) holds all state.
@@ -25,10 +25,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
-pz — cross-pane / cross-tab communication for zellij (hub plugin + this CLI)
+zjw — cross-pane / cross-tab communication for zellij (hub plugin + this CLI)
 
 USAGE:
-    pz [--session <SESSION>] [--hub <URL>] <COMMAND>
+    zjw [--session <SESSION>] [--hub <URL>] <COMMAND>
 
 COMMANDS:
     send <target> <text...>             Write text into a pane's stdin (cross-tab; pane ids are global)
@@ -56,7 +56,7 @@ TARGETS (resolved client-side via `zellij action list-panes --json`):
 
 EXIT CODES: 0 ok, 1 session/timeout, 2 bad target, 3 ask timeout, 4 status unknown.
 SESSION: $ZELLIJ_SESSION_NAME, else the single active `zellij ls` session, else --session.
-HUB: $PZ_HUB_URL, else <pz>/../hub/target/wasm32-wasip1/release/hub.wasm.
+HUB: $ZJW_HUB_URL, else <zjw>/../hub/target/wasm32-wasip1/release/hub.wasm.
 ";
 
 const DEFAULT_READ_LINES: usize = 200;
@@ -237,7 +237,7 @@ fn merge_agent_config(profiles: &mut Vec<AgentProfile>, config: AgentConfigFile)
 }
 
 fn agent_config_path() -> Option<PathBuf> {
-    if let Ok(path) = env::var("PZ_AGENTS_CONFIG") {
+    if let Ok(path) = env::var("ZJW_AGENTS_CONFIG") {
         if !path.trim().is_empty() {
             return Some(PathBuf::from(path));
         }
@@ -377,7 +377,7 @@ fn strip_ansi_csi(input: &str) -> String {
 }
 
 fn fail(code: i32, msg: &str) -> ! {
-    eprintln!("pz: {msg}");
+    eprintln!("zjw: {msg}");
     std::process::exit(code);
 }
 
@@ -589,7 +589,7 @@ fn list_tabs(session: &str) -> Result<Vec<TabEntry>, String> {
 /// Resolve a target spec to a concrete pane id string ("terminal_N" / "plugin_N").
 fn resolve_target(session: &str, spec: &str) -> Result<String, String> {
     // Explicit pane ids pass through — but only if the pane actually exists. (0.44.3's
-    // `write-chars` silently succeeds for missing panes, so pz validates client-side.)
+    // `write-chars` silently succeeds for missing panes, so zjw validates client-side.)
     let explicit = Regex::new(r"^(terminal_\d+|plugin_\d+)$").unwrap();
     if explicit.is_match(spec) {
         let panes = list_panes(session)?;
@@ -749,15 +749,15 @@ fn resolve_tab_pane(session: &str, tab_position: u32) -> Result<String, String> 
 // --- hub RPC -------------------------------------------------------------------------------
 
 fn default_hub_url() -> Result<String, String> {
-    if let Ok(url) = env::var("PZ_HUB_URL") {
+    if let Ok(url) = env::var("ZJW_HUB_URL") {
         return Ok(url);
     }
-    let exe = env::current_exe().map_err(|e| format!("cannot locate pz binary: {e}"))?;
-    let exe_dir = exe.parent().ok_or("cannot locate pz binary directory")?;
+    let exe = env::current_exe().map_err(|e| format!("cannot locate zjw binary: {e}"))?;
+    let exe_dir = exe.parent().ok_or("cannot locate zjw binary directory")?;
     // Candidate locations, in order:
     //   installed layout:      ~/.local/share/zellij-wrangler/hub.wasm
-    //   standard workspace:    <ws>/pz/target/...  and <ws>/hub/target/...
-    //   target-dir redirect:   <root>/target/...   (pz and hub share the root target dir)
+    //   standard workspace:    <ws>/zjw/target/...  and <ws>/hub/target/...
+    //   target-dir redirect:   <root>/target/...   (zjw and hub share the root target dir)
     let mut candidates = Vec::new();
     if let Ok(home) = env::var("HOME") {
         candidates.push(
@@ -796,7 +796,7 @@ fn default_hub_url() -> Result<String, String> {
         }
     }
     Err(format!(
-        "hub plugin not found (looked at {}) — build it with `cargo build -p hub --target wasm32-wasip1 --release`, or set PZ_HUB_URL",
+        "hub plugin not found (looked at {}) — build it with `cargo build -p hub --target wasm32-wasip1 --release`, or set ZJW_HUB_URL",
         candidates.iter().map(|c| c.display().to_string()).collect::<Vec<_>>().join(", ")
     ))
 }
@@ -919,12 +919,12 @@ fn cmd_send(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
     if args.is_empty() {
         fail(
             2,
-            "usage: pz send <target> <text...> | pz send --channel <name> <text...>",
+            "usage: zjw send <target> <text...> | zjw send --channel <name> <text...>",
         );
     }
     if args[0] == "--channel" {
         if args.len() < 3 {
-            fail(2, "usage: pz send --channel <name> <text...>");
+            fail(2, "usage: zjw send --channel <name> <text...>");
         }
         let (channel, text) = (args[1].clone(), args[2..].join(" "));
         let hub_url = resolve_hub(hub_opt);
@@ -938,7 +938,7 @@ fn cmd_send(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
                 0
             },
             Ok(v) => {
-                eprintln!("pz: {}", v["error"].as_str().unwrap_or("hub error"));
+                eprintln!("zjw: {}", v["error"].as_str().unwrap_or("hub error"));
                 2
             },
             Err(HubError::Call(e)) => fail(2, &e),
@@ -962,7 +962,7 @@ fn cmd_send(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
         ) {
             Ok(out) if out.status.success() => {},
             Ok(out) => {
-                eprintln!("pz: {}", String::from_utf8_lossy(&out.stderr).trim());
+                eprintln!("zjw: {}", String::from_utf8_lossy(&out.stderr).trim());
                 return 2;
             },
             Err(e) => fail(2, &e),
@@ -975,7 +975,7 @@ fn cmd_send(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
         ) {
             Ok(out) if out.status.success() => {},
             Ok(out) => {
-                eprintln!("pz: {}", String::from_utf8_lossy(&out.stderr).trim());
+                eprintln!("zjw: {}", String::from_utf8_lossy(&out.stderr).trim());
                 return 2;
             },
             Err(e) => fail(2, &e),
@@ -1021,7 +1021,7 @@ fn cmd_read(session: &str, args: &[String]) -> i32 {
     if positional.len() != 1 {
         fail(
             2,
-            "usage: pz read <target> [--lines N] [--offset N] [--ansi]",
+            "usage: zjw read <target> [--lines N] [--offset N] [--ansi]",
         );
     }
     let pane = match resolve_target(session, positional[0]) {
@@ -1041,7 +1041,7 @@ fn cmd_read(session: &str, args: &[String]) -> i32 {
     let out = match run_zellij(session, &zellij_args) {
         Ok(out) if out.status.success() => out,
         Ok(out) => {
-            eprintln!("pz: {}", String::from_utf8_lossy(&out.stderr).trim());
+            eprintln!("zjw: {}", String::from_utf8_lossy(&out.stderr).trim());
             return 2;
         },
         Err(e) => fail(2, &e),
@@ -1075,7 +1075,7 @@ fn cmd_ask(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
         i += 1;
     }
     if positional.len() < 2 {
-        fail(2, "usage: pz ask <target> <prompt...> [--timeout N]");
+        fail(2, "usage: zjw ask <target> <prompt...> [--timeout N]");
     }
     let target = positional[0];
     let prompt = positional[1..]
@@ -1106,15 +1106,15 @@ fn cmd_ask(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
         Ok(v) => {
             let err = v["error"].as_str().unwrap_or("hub error");
             if err == "ask_timeout" {
-                eprintln!("pz: ask timed out after {timeout_ms} ms");
+                eprintln!("zjw: ask timed out after {timeout_ms} ms");
                 3
             } else {
-                eprintln!("pz: {err}");
+                eprintln!("zjw: {err}");
                 2
             }
         },
         Err(HubError::Call(e)) => {
-            eprintln!("pz: {e}");
+            eprintln!("zjw: {e}");
             3
         },
     }
@@ -1151,7 +1151,10 @@ fn cmd_wait(session: &str, args: &[String]) -> i32 {
         i += 1;
     }
     if positional.len() != 1 {
-        fail(2, "usage: pz wait <target> --until <pattern> [--timeout N]");
+        fail(
+            2,
+            "usage: zjw wait <target> --until <pattern> [--timeout N]",
+        );
     }
     let until = until.unwrap_or_else(|| fail(2, "--until <pattern> is required"));
     let pattern = match Pattern::new(&until) {
@@ -1203,7 +1206,7 @@ fn cmd_wait(session: &str, args: &[String]) -> i32 {
             Some(rem) if rem.is_zero() => {
                 let _ = child.kill();
                 eprintln!(
-                    "pz: wait for {pattern_desc} timed out after {} ms",
+                    "zjw: wait for {pattern_desc} timed out after {} ms",
                     timeout_ms.unwrap_or(0)
                 );
                 return 1;
@@ -1248,7 +1251,7 @@ fn cmd_wait(session: &str, args: &[String]) -> i32 {
             },
             Some("pane_closed") => {
                 let _ = child.kill();
-                eprintln!("pz: target pane closed before a match");
+                eprintln!("zjw: target pane closed before a match");
                 return 1;
             },
             _ => {},
@@ -1256,7 +1259,7 @@ fn cmd_wait(session: &str, args: &[String]) -> i32 {
     }
     let _ = reader.join();
     let _ = child.wait();
-    eprintln!("pz: subscription ended before a match");
+    eprintln!("zjw: subscription ended before a match");
     1
 }
 
@@ -1282,7 +1285,7 @@ fn cmd_listen(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
         i += 1;
     }
     if positional.len() != 1 {
-        fail(2, "usage: pz listen <channel> [--format raw|json]");
+        fail(2, "usage: zjw listen <channel> [--format raw|json]");
     }
     let channel = positional[0].clone();
     let hub_url = resolve_hub(hub_opt);
@@ -1337,17 +1340,17 @@ fn cmd_listen(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
         }
     }
     let _ = child.wait();
-    eprintln!("pz: channel listener ended");
+    eprintln!("zjw: channel listener ended");
     1
 }
 
 fn cmd_status(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
     if args.len() != 1 {
-        fail(2, "usage: pz status <target>");
+        fail(2, "usage: zjw status <target>");
     }
     let pane = match resolve_target(session, &args[0]) {
         Ok(p) => p,
-        // spec: `pz status` reports unknown/expired targets as exit 4 (distinct from the
+        // spec: `zjw status` reports unknown/expired targets as exit 4 (distinct from the
         // exit-2 "bad target" contract of send/wait).
         Err(e) => fail(4, &e),
     };
@@ -1368,7 +1371,7 @@ fn cmd_status(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
             0
         },
         Ok(v) => {
-            eprintln!("pz: {}", v["error"].as_str().unwrap_or("unknown status"));
+            eprintln!("zjw: {}", v["error"].as_str().unwrap_or("unknown status"));
             4
         },
         Err(HubError::Call(e)) => fail(4, &e),
@@ -1413,7 +1416,7 @@ fn cmd_targets(session: &str, args: &[String]) -> i32 {
 fn cmd_agents(session: &str, args: &[String]) -> i32 {
     let json = args.iter().any(|arg| arg == "--json");
     if args.iter().any(|arg| arg != "--json") {
-        fail(2, "usage: pz agents [--json]");
+        fail(2, "usage: zjw agents [--json]");
     }
     let profiles = match load_agent_profiles() {
         Ok(profiles) => profiles,
@@ -1591,7 +1594,7 @@ mod tests {
     const LS_OUTPUT: &str = "\
 session-a [Created 1h 0m 0s ago]
 marvellous-stegosaurus [Created 12m 34s ago] (current)
-pzdbg [Created 1h 11m 29s ago]
+zjwdbg [Created 1h 11m 29s ago]
 quadratic-mountain [Created 2days 5h 52m 40s ago] (EXITED - attach to resurrect)
 ";
 
@@ -1603,7 +1606,7 @@ quadratic-mountain [Created 2days 5h 52m 40s ago] (EXITED - attach to resurrect)
             vec![
                 ("session-a".to_owned(), false),
                 ("marvellous-stegosaurus".to_owned(), true),
-                ("pzdbg".to_owned(), false),
+                ("zjwdbg".to_owned(), false),
             ]
         );
     }
@@ -1692,7 +1695,7 @@ quadratic-mountain [Created 2days 5h 52m 40s ago] (EXITED - attach to resurrect)
     #[test]
     fn choose_session_prefers_live_env_name() {
         let live = live_sessions(LS_OUTPUT);
-        assert_eq!(choose_session(Some("pzdbg"), &live).unwrap(), "pzdbg");
+        assert_eq!(choose_session(Some("zjwdbg"), &live).unwrap(), "zjwdbg");
     }
 
     #[test]

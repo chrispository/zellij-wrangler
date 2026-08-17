@@ -24,7 +24,7 @@
 //! terminated by `unblock_cli_pipe_input` (the invoking CLI exits when it sees that).
 //!
 //! Channel fan-out sends `{"event":"channel","channel":"demo","payload":"hi"}` on each
-//! subscriber's pipe WITHOUT unblocking — subscribers stay open and stream (pz listen).
+//! subscriber's pipe WITHOUT unblocking — subscribers stay open and stream (zjw listen).
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -384,7 +384,7 @@ impl ZellijPlugin for Hub {
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         let pipe_id = match &pipe_message.source {
             PipeSource::Cli(pipe_id) => pipe_id.clone(),
-            // Only CLI pipes are part of the pz protocol; plugin-to-plugin messages are ignored.
+            // Only CLI pipes are part of the zjw protocol; plugin-to-plugin messages are ignored.
             _ => return false,
         };
         let payload = match &pipe_message.payload {

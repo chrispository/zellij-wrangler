@@ -1498,16 +1498,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pz"
-version = "0.1.0"
-dependencies = [
- "regex",
- "serde",
- "serde_json",
- "toml",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2801,6 +2791,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "zjw"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]

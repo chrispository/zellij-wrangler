@@ -16,21 +16,21 @@ pi, omp, hermes, vibe, z-code (and zcode)
 Use the friendly name directly:
 
 ```sh
-pz send codex $'Please review the failing test.\n'
-pz ask opencode $'What are you working on?\n'
-pz send other:codex $'Coordinate with the other Codex pane.\n'
+zjw send codex $'Please review the failing test.\n'
+zjw ask opencode $'What are you working on?\n'
+zjw send other:codex $'Coordinate with the other Codex pane.\n'
 ```
 
-You do not have to run `pz` yourself. Once the pane-comms components and the
+You do not have to run `zjw` yourself. Once the pane-comms components and the
 `zellij-wrangler` skill are installed, just tell an agent what you want: “ask Codex to review
 this,” “coordinate with OpenCode,” or “send this to the other Claude.” The agent discovers the
-target and invokes `pz` for you, asking which pane to use if there is more than one match.
+target and invokes `zjw` for you, asking which pane to use if there is more than one match.
 
-The trailing newline submits the prompt. `pz` writes the text through the target pane's PTY and
+The trailing newline submits the prompt. `zjw` writes the text through the target pane's PTY and
 turns that final newline into Zellij's explicit `Enter` key action, which works with full-screen
 agent TUIs as well as ordinary shells.
 
-If a name matches more than one pane, `pz` refuses to guess and lists each candidate's pane id,
+If a name matches more than one pane, `zjw` refuses to guess and lists each candidate's pane id,
 tab number/name, working directory, and command. The calling agent should ask the user which
 candidate to use, then retry with the selected concrete pane id. `other:NAME` excludes the
 calling pane from the search.
@@ -38,15 +38,15 @@ calling pane from the search.
 Discover the current matches with:
 
 ```sh
-pz agents
-pz agents --json
+zjw agents
+zjw agents --json
 ```
 
 Common profiles are built in, but custom wrappers can be added in
 `$XDG_CONFIG_HOME/pane-comms/agents.toml` (or `~/.config/pane-comms/agents.toml`):
 
 - `commands` is the executable name Zellij reports for the pane, usually the first word in the
-  `command` field from `pz agents --json` (for example, `opencode2`). It is not a shell alias.
+  `command` field from `zjw agents --json` (for example, `opencode2`). It is not a shell alias.
 - `aliases` are extra names users can say when asking an agent. The profile name itself also
   works.
 - `titles` is optional visible terminal-title text used to recognize an agent when its command is
@@ -54,8 +54,8 @@ Common profiles are built in, but custom wrappers can be added in
 
 ```toml
 [agents.codex]
-# Executable shown in the `command` field from `pz agents --json`.
-commands = ["my-codex-wrapper"]
+# Executable shown in the `command` field from `zjw agents --json`.
+commands = ["codex"]
 # Additional name users can say; `codex` also works.
 aliases = ["backend-codex"]
 # Optional terminal-title marker.
@@ -66,13 +66,13 @@ commands = ["opencode2"]
 aliases = ["oc"]
 ```
 
-Set `PZ_AGENTS_CONFIG` to use a different config file. Config entries with a built-in name
-extend that profile; new names add custom profiles. Use `pz agents --json` to see the command and
+Set `ZJW_AGENTS_CONFIG` to use a different config file. Config entries with a built-in name
+extend that profile; new names add custom profiles. Use `zjw agents --json` to see the command and
 title Zellij is reporting for each discovered pane.
 
-`pz read` returns the newest 200 lines of a pane by default. This is a context window for the
+`zjw read` returns the newest 200 lines of a pane by default. This is a context window for the
 agent, not a limit on Zellij's stored scrollback; the default is defined by `DEFAULT_READ_LINES`
-in `pz/src/main.rs`, and `--lines N` overrides it for one request. When recent output is unclear,
+in `zjw/src/main.rs`, and `--lines N` overrides it for one request. When recent output is unclear,
 use `--offset 200` for the previous page or `--offset 400` for the page before that before
 considering the entire history.
 
@@ -82,7 +82,7 @@ directory, running on stock zellij:
 
 1. **`hub/`** — `hub.wasm`, a normal zellij plugin (the only always-on component). Holds named
    channels and in-flight `ask` waits inside the session's server.
-2. **`pz/`** — companion CLI. Every invocation is short-lived and stateless (like `git`): it
+2. **`zjw/`** — companion CLI. Every invocation is short-lived and stateless (like `git`): it
    resolves the target, calls stock `zellij action` / `zellij pipe` / `zellij subscribe`, and
    exits. No daemon.
 3. **`layouts/` + `tests/`** — a test session layout and the end-to-end suite.
@@ -99,7 +99,7 @@ Requires the `wasm32-wasip1` Rust target (`rustup target add wasm32-wasip1`, or 
 
 ```sh
 cargo build -p hub --target wasm32-wasip1 --release   # -> hub/target/wasm32-wasip1/release/hub.wasm
-cargo build -p pz                                      # -> target/debug/pz
+cargo build -p zjw                                      # -> target/debug/zjw
 ```
 
 The hub is pinned to `zellij-tile = "=0.44.3"` (matches zellij 0.44.x, the tested floor).
@@ -111,17 +111,17 @@ Pipes require zellij ≥ 0.40.
 export CARGO_TARGET_DIR="$PWD/target"
 rustup target add wasm32-wasip1
 cargo build -p hub --target wasm32-wasip1 --release
-cargo build -p pz
+cargo build -p zjw
 mkdir -p ~/.local/bin ~/.local/share/zellij-wrangler
-install -m 755 target/debug/pz ~/.local/bin/pz
+install -m 755 target/debug/zjw ~/.local/bin/zjw
 install -m 644 target/wasm32-wasip1/release/hub.wasm ~/.local/share/zellij-wrangler/hub.wasm
 ```
 
-`pz` auto-discovers the installed hub at `~/.local/share/zellij-wrangler/hub.wasm`
-(`$PZ_HUB_URL` overrides). Then seed the permissions cache once (see below), and install the
+`zjw` auto-discovers the installed hub at `~/.local/share/zellij-wrangler/hub.wasm`
+(`$ZJW_HUB_URL` overrides). Then seed the permissions cache once (see below), and install the
 agent skill. If `~/.local/bin` is not already on your `PATH`, add
 `export PATH="$HOME/.local/bin:$PATH"` to your shell startup file; no alias is required:
-agents invoke `pz` through the skill.
+agents invoke `zjw` through the skill.
 
 ```sh
 ln -s ~/Documents/zellij-wrangler/pane-comms/skills/zellij-wrangler ~/.agents/skills/zellij-wrangler
@@ -148,7 +148,7 @@ Agents already running must be restarted to pick up either change.
 ## Load the hub + grant permissions
 
 The hub requests `ReadCliPipes`, `WriteToStdin`, `ReadPaneContents`, and
-`ReadApplicationState` (the last is required by `pz status`; without it the hub panics and
+`ReadApplicationState` (the last is required by `zjw status`; without it the hub panics and
 every blocked pipe hangs). Grant all four per session by pre-seeding the permissions cache
 (avoids the UI prompt; zellij reads `~/.cache/zellij/permissions.kdl` — or
 `$XDG_CACHE_HOME/zellij/permissions.kdl`). Keys are the plugin's stored location — the plain
@@ -169,21 +169,21 @@ Load it (once per session) with a keybind, a layout `run_plugin`, or:
 zellij action start-or-reload-plugin file:///abs/path/hub.wasm
 ```
 
-`pz` also launches the hub on demand the first time a `pz ask/listen/status/send --channel`
+`zjw` also launches the hub on demand the first time a `zjw ask/listen/status/send --channel`
 command runs (`zellij pipe --plugin ...` auto-launches the plugin), so pre-loading is optional.
 
 ## Usage
 
 ```
-pz send <target> <text...>             # write into a pane's stdin (cross-tab)
-pz send --channel <name> <text...>     # broadcast to all listeners of a channel
-pz ask <target> <prompt...> [--timeout N]   # prompt, block until the pane prints new output
-pz read <target> [--lines N] [--offset N]    # bounded pane snapshot; newest 200 by default
-pz wait <target> --until <pat> [--timeout N]  # block until output matches (substring or /regex/)
-pz listen <channel> [--format raw|json]  # stream a channel (Ctrl-C stops)
-pz status <target>                     # one-shot pane status (title/focused/exited)
-pz targets [--json]                    # list panes with tab ids/names and inferred agent roles
-pz agents [--json]                     # list discovered agent panes and selectors
+zjw send <target> <text...>             # write into a pane's stdin (cross-tab)
+zjw send --channel <name> <text...>     # broadcast to all listeners of a channel
+zjw ask <target> <prompt...> [--timeout N]   # prompt, block until the pane prints new output
+zjw read <target> [--lines N] [--offset N]    # bounded pane snapshot; newest 200 by default
+zjw wait <target> --until <pat> [--timeout N]  # block until output matches (substring or /regex/)
+zjw listen <channel> [--format raw|json]  # stream a channel (Ctrl-C stops)
+zjw status <target>                     # one-shot pane status (title/focused/exited)
+zjw targets [--json]                    # list panes with tab ids/names and inferred agent roles
+zjw agents [--json]                     # list discovered agent panes and selectors
 ```
 
 Targets: `terminal_2` | `plugin_1` | `3` (bare == `terminal_3`) | `tab:3` | `tab-name:work`
@@ -191,13 +191,13 @@ Targets: `terminal_2` | `plugin_1` | `3` (bare == `terminal_3`) | `tab:3` | `tab
 `active` (the single focused pane).
 
 Agent targets are resolved client-side from the live pane command/title and must match exactly
-one agent pane. `NAME` is shorthand for `agent:NAME`. If two panes run the same agent, pz
+one agent pane. `NAME` is shorthand for `agent:NAME`. If two panes run the same agent, zjw
 refuses to guess and lists the concrete pane ids; use the intended id for the recipient.
 
 Session: `$ZELLIJ_SESSION_NAME` (inside zellij), else the single active `zellij ls` session,
 else `--session <name>`.
 
-Hub location: `$PZ_HUB_URL`, else auto-discovered next to the `pz` binary.
+Hub location: `$ZJW_HUB_URL`, else auto-discovered next to the `zjw` binary.
 
 ### Exit codes (contract)
 
@@ -216,7 +216,7 @@ no extra work. `tab:N` / `tab-name:X` are resolved client-side via
 `zellij action list-panes --json` (`tab_id`, `tab_name`, `is_focused`) before any zellij call —
 zero protocol changes.
 
-## Wire protocol (pz ⇄ hub)
+## Wire protocol (zjw ⇄ hub)
 
 Requests ride `zellij pipe --plugin hub.wasm --name <n> -- <json>`. The hub answers on the
 **pipe id** (`PipeMessage.source == PipeSource::Cli(pipe_id)`, the UUID the CLI client is
@@ -234,13 +234,13 @@ registered under) — never on the human-readable name — via `cli_pipe_output`
 
 Replies: `{"ok":true,"reply":"...","reply_type":"output"}` / `{"ok":false,"error":"..."}`
 (`error == "ask_timeout"` ⇒ exit 3). Every envelope is newline-terminated (NDJSON), so
-streaming consumers can read line-wise (`pz listen` does).
+streaming consumers can read line-wise (`zjw listen` does).
 
 `listen` acknowledges with `{"ok":true,"event":"ack","reply":"subscribed",
-"reply_type":"subscribed"}` — the `event` field marks it as internal (pz suppresses it).
+"reply_type":"subscribed"}` — the `event` field marks it as internal (zjw suppresses it).
 
 Channel fan-out sends `{"event":"channel","channel":"demo","payload":"hi"}` on each
-subscriber's pipe **without unblocking** — subscribers stay open and stream (`pz listen` wraps
+subscriber's pipe **without unblocking** — subscribers stay open and stream (`zjw listen` wraps
 this as `{"event":"pipe_output","pipe_name":"demo","output":"hi"}` in json format).
 
 `ask` semantics: snapshot the target's scrollback, write the prompt, then poll every 300 ms for
@@ -253,7 +253,7 @@ disabled, or a pane busy running a command that doesn't read stdin, never produc
 
 ```sh
 tests/e2e.sh          # full E2E on a dedicated session (never touches your other sessions)
-cargo test -p pz      # matcher/line-tracker unit tests (M4 L4)
+cargo test -p zjw      # matcher/line-tracker unit tests (M4 L4)
 ```
 
 E2E coverage: M1 baseline (write-chars, dump-screen round-trip, cross-tab), target resolution
@@ -265,11 +265,11 @@ E2E coverage: M1 baseline (write-chars, dump-screen round-trip, cross-tab), targ
 
 - **Full-screen apps** (vim, REPLs): `send` injects keystrokes into the app — same limitation
   as herdr. Documented, not solved.
-- **Stale listeners**: if a `pz listen` client dies, its pipe registration is removed by the
+- **Stale listeners**: if a `zjw listen` client dies, its pipe registration is removed by the
   server, but the hub keeps the subscriber until `unlisten` or session end. A fan-out to a dead
   pipe hits the server's broadcast fallback (harmless: every other client filters by its own
   pipe id), but subscriptions should be treated as session-scoped.
-- **`active`** is ambiguous with multiple attached clients (each has a focused pane) — `pz`
+- **`active`** is ambiguous with multiple attached clients (each has a focused pane) — `zjw`
   errors and lists candidates.
 - **Per-session state**: channels and asks live only in the hub instance of one session.
 - **Version pin**: tested against zellij 0.44.3. The plugin protocol is versioned upstream and
@@ -277,7 +277,7 @@ E2E coverage: M1 baseline (write-chars, dump-screen round-trip, cross-tab), targ
 
 ## Not yet built (deferred, per pane_comms.md)
 
-- M5 agent status + prompting (`pz status` here is pane status, not agent status; agent
+- M5 agent status + prompting (`zjw status` here is pane status, not agent status; agent
   status tokens with TTLs and `zstatus`-style wrappers are M5).
 - Upstream PR candidates: `pipe --pane-id`, `listen`, `subscribe --until/--timeout`,
   `--tab-name` — the thin client features this CLI already covers.

@@ -4,18 +4,18 @@ This fork adds `pane-comms`, a small companion CLI and Zellij hub plugin for com
 between terminal panes and the LLM agents running in them. It works across panes and tabs on
 stock Zellij, without depending on fixed pane numbers or tab names.
 
-`pz` discovers agents from each pane's live command and title, so prompts can use a friendly
+`zjw` discovers agents from each pane's live command and title, so prompts can use a friendly
 agent name:
 
 ```sh
-pz targets
-pz agents
-pz send codex $'Please review the failing test.\n'
-pz ask opencode $'What are you working on?\n'
-pz send other:codex $'Coordinate with the other Codex pane.\n'
+zjw targets
+zjw agents
+zjw send codex $'Please review the failing test.\n'
+zjw ask opencode $'What are you working on?\n'
+zjw send other:codex $'Coordinate with the other Codex pane.\n'
 ```
 
-You do not have to run `pz` yourself. After the pane-comms components and the
+You do not have to run `zjw` yourself. After the pane-comms components and the
 `zellij-wrangler` skill are installed, just tell an agent what you want in plain language:
 “ask Codex to review this,” “coordinate with OpenCode,” or “send this to the other Claude.” The
 agent uses the skill to discover the right pane, invoke the communication tools, and ask you to
@@ -23,13 +23,13 @@ choose when multiple matching sessions exist.
 
 The final newline is converted into an explicit Zellij `Enter` key action. This matters for
 full-screen agent TUIs such as Codex, where writing a raw line feed may display the text without
-submitting it. Without a trailing newline, `pz send` types text but leaves submission to you.
+submitting it. Without a trailing newline, `zjw send` types text but leaves submission to you.
 
 Built-in profiles recognize `claude`, `codex`, `antigravity`, `opencode` (including `opencode2+`),
 `crush`, `pi`, `omp`, `hermes`, `vibe`, and `z-code`/`zcode`. Profiles are matched by command or
 title at send time; `Tab #1`, a renamed tab, and pane numbering do not matter.
 
-If more than one pane matches an agent, `pz` refuses to guess and reports each candidate's pane,
+If more than one pane matches an agent, `zjw` refuses to guess and reports each candidate's pane,
 tab, working directory, and command. Ask which one to use, then send to its concrete pane id.
 `other:NAME` excludes the calling pane, which is useful when two agents of the same type are
 running.
@@ -37,11 +37,11 @@ running.
 ### Defining additional agents
 
 Add custom profiles in `$XDG_CONFIG_HOME/pane-comms/agents.toml` or
-`~/.config/pane-comms/agents.toml`. Use `PZ_AGENTS_CONFIG` to point to another file:
+`~/.config/pane-comms/agents.toml`. Use `ZJW_AGENTS_CONFIG` to point to another file:
 
 - `commands` is the executable name Zellij reports for the pane. It is usually the first word
-  in the `command` field from `pz agents --json`, such as `opencode2` or
-  `my-codex-wrapper`—not a shell alias.
+  in the `command` field from `zjw agents --json`, such as `opencode2` or
+  `codex`—not a shell alias.
 - `aliases` are additional names you can use when asking an agent. The profile name itself also
   works, so this example can be addressed as `codex` or `backend-codex`.
 - `titles` contains visible terminal-title text that identifies the agent when its command is
@@ -49,8 +49,8 @@ Add custom profiles in `$XDG_CONFIG_HOME/pane-comms/agents.toml` or
 
 ```toml
 [agents.codex]
-# The executable shown in the `command` field from `pz agents --json`.
-commands = ["my-codex-wrapper"]
+# The executable shown in the `command` field from `zjw agents --json`.
+commands = ["codex"]
 # Names users can say in addition to the profile name `codex`.
 aliases = ["backend-codex"]
 # Optional visible terminal title used to recognize the pane.
@@ -62,14 +62,14 @@ aliases = ["oc"]
 ```
 
 Entries named after a built-in profile extend it; other entries create new profiles. Use
-`pz agents --json` to see the command and title Zellij is reporting for each discovered pane. The companion
+`zjw agents --json` to see the command and title Zellij is reporting for each discovered pane. The companion
 CLI, hub, and agent skill are in [`pane-comms/`](./pane-comms/), including build instructions,
 permissions, layouts, and the end-to-end test suite. The skill is
 [`pane-comms/skills/zellij-wrangler/SKILL.md`](./pane-comms/skills/zellij-wrangler/SKILL.md).
 
-For pane reading, `pz read` defaults to the newest 200 lines so routine requests do not pull a
+For pane reading, `zjw read` defaults to the newest 200 lines so routine requests do not pull a
 whole scrollback into an agent's context. The default is defined by `DEFAULT_READ_LINES` in
-`pane-comms/pz/src/main.rs`; use `pz read <target> --lines N` for a one-off size and
+`pane-comms/zjw/src/main.rs`; use `zjw read <target> --lines N` for a one-off size and
 `--offset 200` or `--offset 400` to page backward when recent context is unclear. Full history
 should be reserved for an explicit request.
 
@@ -82,17 +82,17 @@ cd pane-comms
 rustup target add wasm32-wasip1
 export CARGO_TARGET_DIR="$PWD/target"
 cargo build -p hub --target wasm32-wasip1 --release
-cargo build -p pz
+cargo build -p zjw
 
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/zellij-wrangler"
-install -m 755 target/debug/pz "$HOME/.local/bin/pz"
+install -m 755 target/debug/zjw "$HOME/.local/bin/zjw"
 install -m 644 target/wasm32-wasip1/release/hub.wasm \
   "$HOME/.local/share/zellij-wrangler/hub.wasm"
 ```
 
 Put `~/.local/bin` on your `PATH` if it is not already there (for example, add
 `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc` or `~/.zshrc`). No shell alias is needed:
-the agent skill invokes `pz` for you. Install the skill links as described in the full
+the agent skill invokes `zjw` for you. Install the skill links as described in the full
 [`pane-comms` README](./pane-comms/README.md), then restart already-running agents so they load
 it.
 

@@ -21,12 +21,12 @@ One repo, three artifacts — **no fork of zellij, no patched zellij binary, no 
    start-or-reload-plugin <url>` (actions.rs:1854), or a keybind.
 2. **Companion CLI** (a small standalone binary/scripts in the SAME repo — this is the "new
    version of the CLI", but it is NOT zellij; it is YOUR tool that wraps stock zellij commands):
-   - `pz send <target> <text>` → `zellij action write-chars --pane-id ...` (targets resolved
+   - `zjw send <target> <text>` → `zellij action write-chars --pane-id ...` (targets resolved
      client-side via `list-panes --json` / `list-tabs --json`, which is how `--tab-name`
      support exists without touching zellij);
-   - `pz ask <target> <prompt>` → blocking `zellij pipe --plugin hub.wasm --name ask -- ...`;
-   - `pz status <target>` → one-shot status query through the hub;
-   - `pz wait <target> --until X [--timeout N]` → bounded wait (subscribe loop or hub poll).
+   - `zjw ask <target> <prompt>` → blocking `zellij pipe --plugin hub.wasm --name ask -- ...`;
+   - `zjw status <target>` → one-shot status query through the hub;
+   - `zjw wait <target> --until X [--timeout N]` → bounded wait (subscribe loop or hub poll).
    This is where all CLI ergonomics live, so they never collide with upstream zellij churn.
 3. **Wrapper/install scripts** (M5): `zstatus`-style hooks that wrap agent CLIs
    (claude/codex/opencode/...) so they self-report status to the hub via pipes or files.
@@ -125,7 +125,7 @@ and reading output is a separate on-demand `pane.read`. Follow these rules in ev
    the process inside the pane), and waiters wait on that enum. The server must never parse or
    buffer pane output to infer state.
 
-### Companion CLI (`pz`) + hub protocol (the PRIMARY deliverable)
+### Companion CLI (`zjw`) + hub protocol (the PRIMARY deliverable)
 
 The zellij-native M2-M4 sections below are the OPTIONAL upstream variants. The DEFAULT
 implementation is plugin + companion CLI, per §1.1. Milestone → artifact mapping:
@@ -133,28 +133,28 @@ implementation is plugin + companion CLI, per §1.1. Milestone → artifact mapp
 **Runtime model (who runs when — READ THIS before designing anything):** the HUB is the only
 always-on component. It loads with the session (layout `run_plugin`, keybind, or
 `zellij action start-or-reload-plugin <url>`) and lives inside the zellij server for the whole
-session, holding channels, waiters, and status tokens. `pz` is NOT launched by zellij and does
-NOT run in the background: every `pz ...` invocation is a short-lived, stateless process (like
+session, holding channels, waiters, and status tokens. `zjw` is NOT launched by zellij and does
+NOT run in the background: every `zjw ...` invocation is a short-lived, stateless process (like
 `zellij action` / `git`) that resolves the target, calls stock zellij commands
 (`zellij action write-chars --pane-id ...`, `zellij pipe --plugin hub.wasm --name ask -- ...`,
-`zellij subscribe ...`), and exits. `pz ask`/`pz wait` stay alive only as long as the blocking
-pipe/subscribe they opened; `pz listen` streams until Ctrl-C — both still on-demand. Agents call
-`pz` like any other tool; keybinds can invoke it via `Action::RunCommand`. **Do NOT build
-`pz` as a daemon** — the hub already holds the state; a daemon would duplicate it. (Analogy:
-hub ≈ herdr's server core running inside zellij, `pz` ≈ herdr's CLI, wrappers ≈ herdr's
+`zellij subscribe ...`), and exits. `zjw ask`/`zjw wait` stay alive only as long as the blocking
+pipe/subscribe they opened; `zjw listen` streams until Ctrl-C — both still on-demand. Agents call
+`zjw` like any other tool; keybinds can invoke it via `Action::RunCommand`. **Do NOT build
+`zjw` as a daemon** — the hub already holds the state; a daemon would duplicate it. (Analogy:
+hub ≈ herdr's server core running inside zellij, `zjw` ≈ herdr's CLI, wrappers ≈ herdr's
 integrations.)
 
 | Milestone | Primary artifact (default) | Optional native variant |
 |---|---|---|
 | M1 baseline | harness helpers + tests | — |
-| M2 pipe --pane-id | `pz send` wraps `zellij action write-chars --pane-id`; hub handles the payload | `zellij pipe --pane-id` (upstream PR) |
-| M3 listen | hub emulates listeners (writes payloads into subscriber panes via `write_chars_to_pane_id`); `pz listen` opens the channel | `zellij listen` (upstream PR) |
-| M4 wait | `pz wait` = `zellij subscribe --format json` loop with a client-side matcher | `subscribe --until` (upstream PR) |
-| M5 status | hub token registry + `zstatus` wrappers; `pz status`/`pz ask` | OSC status + `zellij agent` (fork/upstream) |
+| M2 pipe --pane-id | `zjw send` wraps `zellij action write-chars --pane-id`; hub handles the payload | `zellij pipe --pane-id` (upstream PR) |
+| M3 listen | hub emulates listeners (writes payloads into subscriber panes via `write_chars_to_pane_id`); `zjw listen` opens the channel | `zellij listen` (upstream PR) |
+| M4 wait | `zjw wait` = `zellij subscribe --format json` loop with a client-side matcher | `subscribe --until` (upstream PR) |
+| M5 status | hub token registry + `zstatus` wrappers; `zjw status`/`zjw ask` | OSC status + `zellij agent` (fork/upstream) |
 
 **Build order** (each step shippable): (1) integration-harness helpers + M1 tests, (2) hub
-skeleton + pipe plumbing + `pz send`/`pz ask` (proves the channel end-to-end), (3) M4 matcher +
-`pz wait` (pure client-side), (4) M3 listeners in the hub, (5) M5 tokens + wrappers.
+skeleton + pipe plumbing + `zjw send`/`zjw ask` (proves the channel end-to-end), (3) M4 matcher +
+`zjw wait` (pure client-side), (4) M3 listeners in the hub, (5) M5 tokens + wrappers.
 
 #### Repo layout
 
@@ -163,29 +163,29 @@ pane-comms/
 ├── hub/            # Rust wasm plugin (cdylib, wasm32-wasip1)
 │   ├── src/lib.rs  # ZellijPlugin impl: pipe(), event(), render(), set_timeout tick
 │   └── Cargo.toml  # deps: zellij-tile (path or crates.io), serde
-├── pz/             # companion CLI (any language; Rust keeps it one binary)
+├── zjw/             # companion CLI (any language; Rust keeps it one binary)
 │   └── src/main.rs # subcommands: send, ask, status, wait, listen, targets
 ├── wrappers/       # zstatus + agent wrapper scripts (M5)
 └── README.md
 ```
 
-#### Hub wire protocol (pz ⇄ hub over named pipes)
+#### Hub wire protocol (zjw ⇄ hub over named pipes)
 
 All payloads are JSON strings (pipes carry `Option<String>` only). Reserved pipe names:
 `ask` (blocking request/response), `status` (one-shot), `report` (agents self-report), plus
 user channel names. Envelopes:
 
 ```json
-{"cmd":"send","target":"terminal_2","text":"hi"}              // pz → hub
+{"cmd":"send","target":"terminal_2","text":"hi"}              // zjw → hub
 {"cmd":"wait","target":"terminal_2","until":"done","timeout_ms":60000}
 {"cmd":"status","target":"tab-name:work"}
-// hub → pz (via cli_pipe_output(pipe_id, ...), then unblock_cli_pipe_input(pipe_id)):
+// hub → zjw (via cli_pipe_output(pipe_id, ...), then unblock_cli_pipe_input(pipe_id)):
 {"ok":true,"status":"working","reply":"..."}
 {"ok":false,"error":"pane terminal_2 not found"}
 ```
 
-Target syntax (resolved in `pz`, which sends a CONCRETE pane id to the hub): `terminal_2` |
-`plugin_1` | `tab:3` | `tab-name:work` | `active`. `pz` resolves `tab:*` via
+Target syntax (resolved in `zjw`, which sends a CONCRETE pane id to the hub): `terminal_2` |
+`plugin_1` | `tab:3` | `tab-name:work` | `active`. `zjw` resolves `tab:*` via
 `list-panes --json` / `list-tabs --json` before calling the hub.
 
 Hub state: `HashMap<pane_id, AgentStatus>` + TTLs (M5), expired on a `set_timeout` tick.
@@ -195,13 +195,13 @@ Hub permissions (config `allowed` KDL block; plugin calls `request_permission` a
 shim.rs:92): `ReadPaneContents`, `WriteToStdin`, `ReadCliPipes`, `MessageAndLaunchOtherPlugins`;
 `RunCommands` only if the hub shells out. TEST the permission-denied path.
 
-#### `pz` CLI contract (exit codes are part of the contract — document them)
+#### `zjw` CLI contract (exit codes are part of the contract — document them)
 
-- `pz send <target> <text>` — exit 0 delivered; 2 bad/missing target; 1 session not found.
-- `pz ask <target> <prompt> [--timeout N]` — blocking; exit 0 + reply on stdout; 3 timeout.
-- `pz status <target>` — JSON status on stdout; exit 4 unknown/expired.
-- `pz wait <target> --until X [--timeout N]` — exit 0 on match; 1 timeout.
-- `pz listen <channel> [--format raw|json]` — long-lived; Ctrl-C stops it.
+- `zjw send <target> <text>` — exit 0 delivered; 2 bad/missing target; 1 session not found.
+- `zjw ask <target> <prompt> [--timeout N]` — blocking; exit 0 + reply on stdout; 3 timeout.
+- `zjw status <target>` — JSON status on stdout; exit 4 unknown/expired.
+- `zjw wait <target> --until X [--timeout N]` — exit 0 on match; 1 timeout.
+- `zjw listen <channel> [--format raw|json]` — long-lived; Ctrl-C stops it.
 - Session discovery mirrors `get_active_session()` (src/commands.rs:458): `ZELLIJ_SESSION_NAME`
   env, else `zellij ls`, else error listing active sessions.
 
@@ -221,7 +221,7 @@ shim.rs:92): `ReadPaneContents`, `WriteToStdin`, `ReadCliPipes`, `MessageAndLaun
 
 - `send` into a pane running a full-screen app (vim/REPL) injects keystrokes into that app —
   define and document the behavior (herdr has the same limitation).
-- Multiple sessions: hub state is per-session; `pz` must target the right one.
+- Multiple sessions: hub state is per-session; `zjw` must target the right one.
 - First-run UX when the hub requests permissions (approve prompt in the UI).
 - Plugin API drift: pin the zellij version in CI (point above) so the E2E suite never runs
   against a moving target.
@@ -271,7 +271,7 @@ Add tests proving the existing primitives work end-to-end, so later regressions 
 
 ### M2 — `zellij pipe --pane-id <PANE_ID>`: deliver a pipe payload to a terminal pane's stdin
 
-> PRIMARY IMPLEMENTATION: hub + `pz send` (see "Companion CLI + hub protocol" above). This
+> PRIMARY IMPLEMENTATION: hub + `zjw send` (see "Companion CLI + hub protocol" above). This
 > section describes the OPTIONAL native variant — the `zellij pipe --pane-id` flag you would
 > submit upstream as a PR. Implement it only if you decide to contribute upstream.
 
@@ -329,7 +329,7 @@ Ordered steps:
 
 ### M3 — `zellij listen --name X`: join a named pipe from a shell (receive side)
 
-> PRIMARY IMPLEMENTATION: hub-emulated listeners + `pz listen` (see "Companion CLI + hub
+> PRIMARY IMPLEMENTATION: hub-emulated listeners + `zjw listen` (see "Companion CLI + hub
 > protocol"). This section is the OPTIONAL native variant (upstream PR candidate).
 
 A long-lived CLI client that prints everything delivered to pipe X to stdout (raw or JSON). This is
@@ -373,7 +373,7 @@ from a sender in tab 3 with no extra work — no tab handling needed here.
 
 ### M4 — `zellij subscribe --until <pattern> [--timeout <ms>]` (wait for output)
 
-> PRIMARY IMPLEMENTATION: `pz wait` (see "Companion CLI + hub protocol"). This section is the
+> PRIMARY IMPLEMENTATION: `zjw wait` (see "Companion CLI + hub protocol"). This section is the
 > OPTIONAL native variant (upstream PR candidate); the matcher logic is identical either way.
 
 Pure client-side, zero protocol/server changes. Highest value-per-effort; do this first if you want
