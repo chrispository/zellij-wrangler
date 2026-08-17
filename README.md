@@ -39,6 +39,58 @@
     </a>
 </p>
 
+## Zellij Wrangler: agent-aware pane prompting
+
+This fork adds `pane-comms`, a small companion CLI and Zellij hub plugin for communication
+between terminal panes and the LLM agents running in them. It works across panes and tabs on
+stock Zellij, without depending on fixed pane numbers or tab names.
+
+`pz` discovers agents from each pane's live command and title, so prompts can use a friendly
+agent name:
+
+```sh
+pz targets
+pz agents
+pz send codex $'Please review the failing test.\n'
+pz ask opencode $'What are you working on?\n'
+pz send other:codex $'Coordinate with the other Codex pane.\n'
+```
+
+The final newline is converted into an explicit Zellij `Enter` key action. This matters for
+full-screen agent TUIs such as Codex, where writing a raw line feed may display the text without
+submitting it. Without a trailing newline, `pz send` types text but leaves submission to you.
+
+Built-in profiles recognize `claude`, `codex`, `antigravity`, `opencode` (including `opencode2+`),
+`crush`, `pi`, `omp`, `hermes`, `vibe`, and `z-code`/`zcode`. Profiles are matched by command or
+title at send time; `Tab #1`, a renamed tab, and pane numbering do not matter.
+
+If more than one pane matches an agent, `pz` refuses to guess and reports each candidate's pane,
+tab, working directory, and command. Ask which one to use, then send to its concrete pane id.
+`other:NAME` excludes the calling pane, which is useful when two agents of the same type are
+running.
+
+### Defining additional agents
+
+Add custom profiles in `$XDG_CONFIG_HOME/pane-comms/agents.toml` or
+`~/.config/pane-comms/agents.toml`. Use `PZ_AGENTS_CONFIG` to point to another file:
+
+```toml
+[agents.my-codex]
+commands = ["my-codex-wrapper"]
+aliases = ["backend-codex"]
+titles = ["Backend Codex"]
+
+[agents.opencode]
+commands = ["opencode-beta"]
+aliases = ["oc"]
+```
+
+Entries named after a built-in profile extend it; other entries create new profiles. Use
+`pz agents --json` to inspect the profiles currently discovered in the session. The companion
+CLI, hub, and agent skill are in [`pane-comms/`](./pane-comms/), including build instructions,
+permissions, layouts, and the end-to-end test suite. The skill is
+[`pane-comms/skills/zellij-wrangler/SKILL.md`](./pane-comms/skills/zellij-wrangler/SKILL.md).
+
 # What is this?
 
 [Zellij](#origin-of-the-name) is a workspace aimed at developers, ops-oriented people and anyone who loves the terminal. Similar programs are sometimes called "Terminal Multiplexers".
