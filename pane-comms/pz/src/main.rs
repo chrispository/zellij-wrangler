@@ -16,6 +16,7 @@ use regex::Regex;
 use serde::Deserialize;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -44,6 +45,7 @@ TARGETS (resolved client-side via `zellij action list-panes --json`):
     terminal_2 | plugin_1 | 3          explicit pane id (bare number == terminal_N)
     tab:3                              the active pane of tab 3 (focused, else first terminal)
     tab-name:work                      first tab named \"work\" (names are not unique)
+    agent:opencode                     the unique pane running OpenCode (codex/claude too)
     active                             the single focused pane
 
 EXIT CODES: 0 ok, 1 session/timeout, 2 bad target, 3 ask timeout, 4 status unknown.
@@ -59,6 +61,8 @@ struct PaneEntry {
     tab_id: u32,
     tab_name: String,
     title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pane_command: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,7 +72,38 @@ struct TabEntry {
 }
 
 fn pane_id_string(e: &PaneEntry) -> String {
-    format!("{}{}", if e.is_plugin { "plugin_" } else { "terminal_" }, e.id)
+    format!(
+        "{}{}",
+        if e.is_plugin { "plugin_" } else { "terminal_" },
+        e.id
+    )
+}
+
+/// Remove ANSI CSI styling from `zellij ls` output. Zellij currently colorizes session
+/// names even when stdout is a pipe, so parsing the raw first whitespace-delimited token can
+/// accidentally produce a session name like "\\x1b[32;1mmarvellous-stegosaurus\\x1b[m".
+fn strip_ansi_csi(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < bytes.len() {
+                let byte = bytes[i];
+                i += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+        } else {
+            let rest = &input[i..];
+            let ch = rest.chars().next().expect("valid UTF-8 boundary");
+            output.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    output
 }
 
 fn fail(code: i32, msg: &str) -> ! {
@@ -89,33 +124,159 @@ fn run_zellij(session: &str, args: &[&str]) -> Result<std::process::Output, Stri
         .map_err(|e| format!("failed to run zellij: {e}"))
 }
 
+/// Parse `zellij ls` output into `(name, is_current)` pairs, skipping EXITED sessions.
+fn live_sessions(ls_output: &str) -> Vec<(String, bool)> {
+    ls_output
+        .lines()
+        .map(strip_ansi_csi)
+        .map(|line| line.trim().to_owned())
+        .filter(|l| !l.is_empty() && !l.contains("EXITED"))
+        .map(|l| {
+            let name = l.split_whitespace().next().unwrap_or("").to_owned();
+            (name, l.contains("(current)"))
+        })
+        .filter(|(name, _)| !name.is_empty())
+        .collect()
+}
+
+/// Choose the session to target: an env-derived name only if it is still live, else the
+/// session zellij marks `(current)`, else the single live session.
+fn choose_session(env_name: Option<&str>, live: &[(String, bool)]) -> Result<String, String> {
+    if let Some(name) = env_name.filter(|s| !s.is_empty()) {
+        if live.iter().any(|(n, _)| n == name) {
+            return Ok(name.to_owned());
+        }
+        // env session is stale (e.g. inherited from a session that has since exited) — fall
+        // through to the live-session logic instead of failing on a dead socket.
+    }
+    if let Some((name, true)) = live.iter().find(|(_, is_current)| *is_current) {
+        return Ok(name.clone());
+    }
+    match live.len() {
+        1 => Ok(live[0].0.clone()),
+        0 => Err(
+            "no active zellij session found — run from inside a session or pass --session <name>"
+                .to_owned(),
+        ),
+        _ => Err(format!(
+            "multiple active sessions ({}); pass --session <name>",
+            live.iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Check a session by asking that exact server for pane JSON. This is deliberately stronger than
+/// trusting `zellij ls`: when ZELLIJ_SESSION_NAME is stale, zellij treats that name as current and
+/// changes the presentation of `zellij ls` as well.
+fn session_is_usable(session: &str) -> bool {
+    run_zellij(session, &["action", "list-panes", "--json"])
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| serde_json::from_slice::<Vec<PaneEntry>>(&out.stdout).ok())
+        .is_some()
+}
+
+fn session_has_attached_client(session: &str) -> bool {
+    run_zellij(session, &["action", "list-clients"])
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .skip(1)
+                .any(|line| !line.trim().is_empty())
+        })
+        .unwrap_or(false)
+}
+
+/// Find the session containing the pane id exported to the current process. Pane ids are only
+/// unique within a session, so an ambiguous match must be reported instead of guessed.
+fn session_for_pane_id(live: &[(String, bool)], pane_id: u32) -> Result<Option<String>, String> {
+    let matches = live
+        .iter()
+        .filter_map(|(session, _)| {
+            let out = run_zellij(session, &["action", "list-panes", "--json"]).ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let panes = serde_json::from_slice::<Vec<PaneEntry>>(&out.stdout).ok()?;
+            panes
+                .iter()
+                .any(|pane| !pane.is_plugin && pane.id == pane_id)
+                .then(|| session.clone())
+        })
+        .collect::<Vec<_>>();
+    let attached_matches = matches
+        .iter()
+        .filter(|session| session_has_attached_client(session))
+        .cloned()
+        .collect::<Vec<_>>();
+    let matches = if attached_matches.is_empty() {
+        matches
+    } else {
+        attached_matches
+    };
+    match matches.as_slice() {
+        [] => Ok(None),
+        [session] => Ok(Some(session.clone())),
+        many => Err(format!(
+            "pane terminal_{pane_id} appears in multiple active sessions ({}); pass --session <name>",
+            many.join(", ")
+        )),
+    }
+}
+
 fn resolve_session(explicit: Option<&str>) -> Result<String, String> {
     if let Some(s) = explicit {
         return Ok(s.to_owned());
     }
-    if let Ok(s) = env::var("ZELLIJ_SESSION_NAME") {
-        if !s.is_empty() {
-            return Ok(s);
+
+    let env_name = env::var("ZELLIJ_SESSION_NAME").ok();
+    if let Some(name) = env_name.as_deref().filter(|s| !s.is_empty()) {
+        if session_is_usable(name) {
+            return Ok(name.to_owned());
         }
     }
+
+    // Remove the possibly stale env var before listing. Otherwise zellij can label the stale
+    // session as `(current)` and omit its EXITED marker, defeating fallback discovery.
     let out = Command::new("zellij")
         .arg("ls")
+        .env_remove("ZELLIJ_SESSION_NAME")
         .output()
         .map_err(|e| format!("failed to run `zellij ls`: {e}"))?;
-    let active: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.contains("EXITED"))
-        .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
-        .collect();
-    match active.len() {
-        1 => Ok(active[0].clone()),
-        0 => Err("no active zellij session found — run from inside a session or pass --session <name>".to_owned()),
-        _ => Err(format!(
-            "multiple active sessions ({}); pass --session <name>",
-            active.join(", ")
-        )),
+    let live = live_sessions(&String::from_utf8_lossy(&out.stdout));
+    if let Ok(pane_id) = env::var("ZELLIJ_PANE_ID")
+        .ok()
+        .unwrap_or_default()
+        .parse::<u32>()
+    {
+        if let Some(session) = session_for_pane_id(&live, pane_id)? {
+            return Ok(session);
+        }
     }
+    choose_session(None, &live)
+}
+
+/// Parse a `zellij action <what>` JSON reply; if stdout is not JSON, prefer reporting the
+/// command's stderr (zellij prints "Session not found" etc. there but can still exit 0).
+fn parse_json_or_err<T: serde::de::DeserializeOwned>(
+    session: &str,
+    what: &str,
+    out: &std::process::Output,
+) -> Result<T, String> {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str::<T>(&stdout).map_err(|e| {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        if !stderr.is_empty() {
+            format!("`zellij action {what}` in session {session}: {stderr}")
+        } else {
+            format!("could not parse `{what}` output from session {session}: {e}")
+        }
+    })
 }
 
 fn list_panes(session: &str) -> Result<Vec<PaneEntry>, String> {
@@ -123,8 +284,7 @@ fn list_panes(session: &str) -> Result<Vec<PaneEntry>, String> {
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
     }
-    serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("could not parse `list-panes --json` output: {e}"))
+    parse_json_or_err(session, "list-panes --json", &out)
 }
 
 fn list_tabs(session: &str) -> Result<Vec<TabEntry>, String> {
@@ -132,12 +292,14 @@ fn list_tabs(session: &str) -> Result<Vec<TabEntry>, String> {
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
     }
-    serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("could not parse `list-tabs --json` output: {e}"))
+    parse_json_or_err(session, "list-tabs --json", &out)
 }
 
 /// Resolve a target spec to a concrete pane id string ("terminal_N" / "plugin_N").
 fn resolve_target(session: &str, spec: &str) -> Result<String, String> {
+    if let Some(role) = spec.strip_prefix("agent:") {
+        return resolve_agent_target(session, role);
+    }
     // Explicit pane ids pass through — but only if the pane actually exists. (0.44.3's
     // `write-chars` silently succeeds for missing panes, so pz validates client-side.)
     let explicit = Regex::new(r"^(terminal_\d+|plugin_\d+)$").unwrap();
@@ -158,17 +320,14 @@ fn resolve_target(session: &str, spec: &str) -> Result<String, String> {
     }
     if let Some(name) = spec.strip_prefix("tab-name:") {
         let tabs = list_tabs(session)?;
-        let tab = tabs
-            .iter()
-            .find(|t| t.name == name)
-            .ok_or_else(|| {
-                let valid = tabs
-                    .iter()
-                    .map(|t| format!("{} ({})", t.name, t.position))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("no tab named '{name}' — valid tabs: {valid}")
-            })?;
+        let tab = tabs.iter().find(|t| t.name == name).ok_or_else(|| {
+            let valid = tabs
+                .iter()
+                .map(|t| format!("{} ({})", t.name, t.position))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("no tab named '{name}' — valid tabs: {valid}")
+        })?;
         return resolve_tab_pane(session, tab.position);
     }
     if let Some(n) = spec.strip_prefix("tab:") {
@@ -197,8 +356,94 @@ fn resolve_target(session: &str, spec: &str) -> Result<String, String> {
         };
     }
     Err(format!(
-        "unknown target '{spec}' (expected terminal_N, plugin_N, N, tab:N, tab-name:NAME, or active)"
+        "unknown target '{spec}' (expected terminal_N, plugin_N, N, tab:N, tab-name:NAME, agent:NAME, or active)"
     ))
+}
+
+/// Infer a stable agent role from the pane command. Pane titles are useful as a fallback (for
+/// example `OC | ...`), but commands are the primary signal because titles often change while
+/// an agent is running.
+fn agent_kind(pane: &PaneEntry) -> Option<&'static str> {
+    if pane.is_plugin {
+        return None;
+    }
+    let command = pane
+        .pane_command
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let title = pane.title.to_ascii_lowercase();
+    if command.contains("opencode") || title.starts_with("oc |") {
+        Some("opencode")
+    } else if command.contains("codex") {
+        Some("codex")
+    } else if command.contains("claude") {
+        Some("claude")
+    } else {
+        None
+    }
+}
+
+fn agent_role_matches(role: &str, kind: &str) -> bool {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "opencode" | "open-code" | "oc" => kind == "opencode",
+        "codex" => kind == "codex",
+        "claude" => kind == "claude",
+        _ => false,
+    }
+}
+
+/// Resolve an agent role to a pane. Role targets intentionally require a unique match: silently
+/// choosing one of two Codex panes would send a prompt to the wrong agent. The error lists the
+/// candidates so the caller can choose a concrete pane id.
+fn resolve_agent_target(session: &str, role: &str) -> Result<String, String> {
+    let role = role.trim();
+    if role.is_empty() {
+        return Err(
+            "empty agent role (use agent:opencode, agent:codex, or agent:claude)".to_owned(),
+        );
+    }
+    let panes = list_panes(session)?;
+    let candidates: Vec<&PaneEntry> = panes
+        .iter()
+        .filter(|pane| agent_kind(pane).is_some_and(|kind| agent_role_matches(role, kind)))
+        .collect();
+    match candidates.as_slice() {
+        [pane] => Ok(pane_id_string(pane)),
+        [] => {
+            let available = panes
+                .iter()
+                .filter_map(|pane| {
+                    agent_kind(pane).map(|kind| format!("agent:{kind}={}", pane_id_string(pane)))
+                })
+                .collect::<Vec<_>>();
+            if available.is_empty() {
+                Err(format!("no agent '{role}' found"))
+            } else {
+                Err(format!(
+                    "no agent '{role}' found (available: {})",
+                    available.join(", ")
+                ))
+            }
+        },
+        many => {
+            let candidates = many
+                .iter()
+                .map(|pane| {
+                    format!(
+                        "{} (tab {}: {})",
+                        pane_id_string(pane),
+                        pane.tab_id,
+                        pane.title
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "agent '{role}' is ambiguous: {candidates}; use a concrete pane id"
+            ))
+        },
+    }
 }
 
 /// The active pane of a tab: the focused one, else the first non-plugin pane. Errors if the tab
@@ -225,14 +470,42 @@ fn default_hub_url() -> Result<String, String> {
     }
     let exe = env::current_exe().map_err(|e| format!("cannot locate pz binary: {e}"))?;
     let exe_dir = exe.parent().ok_or("cannot locate pz binary directory")?;
-    // Candidate locations, depending on where cargo put the artifacts:
-    //   standard workspace:  <ws>/pz/target/...  and <ws>/hub/target/...
-    //   target-dir redirect: <root>/target/...   (pz and hub share the root target dir)
-    let candidates = [
-        exe_dir.join("..").join("hub").join("target").join("wasm32-wasip1").join("release").join("hub.wasm"),
-        exe_dir.join("..").join("wasm32-wasip1").join("release").join("hub.wasm"),
-        exe_dir.join("..").join("..").join("hub").join("target").join("wasm32-wasip1").join("release").join("hub.wasm"),
-    ];
+    // Candidate locations, in order:
+    //   installed layout:      ~/.local/share/zellij-wrangler/hub.wasm
+    //   standard workspace:    <ws>/pz/target/...  and <ws>/hub/target/...
+    //   target-dir redirect:   <root>/target/...   (pz and hub share the root target dir)
+    let mut candidates = Vec::new();
+    if let Ok(home) = env::var("HOME") {
+        candidates.push(
+            PathBuf::from(&home)
+                .join(".local")
+                .join("share")
+                .join("zellij-wrangler")
+                .join("hub.wasm"),
+        );
+    }
+    candidates.extend([
+        exe_dir
+            .join("..")
+            .join("hub")
+            .join("target")
+            .join("wasm32-wasip1")
+            .join("release")
+            .join("hub.wasm"),
+        exe_dir
+            .join("..")
+            .join("wasm32-wasip1")
+            .join("release")
+            .join("hub.wasm"),
+        exe_dir
+            .join("..")
+            .join("..")
+            .join("hub")
+            .join("target")
+            .join("wasm32-wasip1")
+            .join("release")
+            .join("hub.wasm"),
+    ]);
     for candidate in &candidates {
         if let Ok(canonical) = candidate.canonicalize() {
             return Ok(format!("file://{}", canonical.display()));
@@ -251,7 +524,13 @@ fn resolve_hub(hub_opt: Option<String>) -> String {
 enum HubError {
     Call(String),
 }
-fn hub_rpc(session: &str, hub_url: &str, name: &str, payload: &str, outer_timeout: Duration) -> Result<serde_json::Value, HubError> {
+fn hub_rpc(
+    session: &str,
+    hub_url: &str,
+    name: &str,
+    payload: &str,
+    outer_timeout: Duration,
+) -> Result<serde_json::Value, HubError> {
     let mut child = zellij_cmd(
         session,
         &["pipe", "--plugin", hub_url, "--name", name, "--", payload],
@@ -273,15 +552,25 @@ fn hub_rpc(session: &str, hub_url: &str, name: &str, payload: &str, outer_timeou
                 }
                 std::thread::sleep(Duration::from_millis(50));
             },
-            Err(e) => return Err(HubError::Call(format!("failed waiting for zellij pipe: {e}"))),
+            Err(e) => {
+                return Err(HubError::Call(format!(
+                    "failed waiting for zellij pipe: {e}"
+                )))
+            },
         }
     };
-    let out = child.wait_with_output().map_err(|e| HubError::Call(e.to_string()))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| HubError::Call(e.to_string()))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !status.success() {
         let stderr = stderr.trim().to_owned();
-        let msg = if stderr.is_empty() { stdout.trim().to_owned() } else { stderr };
+        let msg = if stderr.is_empty() {
+            stdout.trim().to_owned()
+        } else {
+            stderr
+        };
         return Err(HubError::Call(msg));
     }
     serde_json::from_str(stdout.trim())
@@ -344,7 +633,10 @@ impl LineTracker {
 
 fn cmd_send(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
     if args.is_empty() {
-        fail(2, "usage: pz send <target> <text...> | pz send --channel <name> <text...>");
+        fail(
+            2,
+            "usage: pz send <target> <text...> | pz send --channel <name> <text...>",
+        );
     }
     if args[0] == "--channel" {
         if args.len() < 3 {
@@ -352,7 +644,8 @@ fn cmd_send(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
         }
         let (channel, text) = (args[1].clone(), args[2..].join(" "));
         let hub_url = resolve_hub(hub_opt);
-        let payload = serde_json::json!({"cmd": "send", "channel": channel, "text": text}).to_string();
+        let payload =
+            serde_json::json!({"cmd": "send", "channel": channel, "text": text}).to_string();
         return match hub_rpc(session, &hub_url, "send", &payload, Duration::from_secs(10)) {
             Ok(v) if v["ok"] == true => {
                 if let Some(msg) = v["reply"].as_str() {
@@ -376,7 +669,10 @@ fn cmd_send(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
         Ok(p) => p,
         Err(e) => fail(2, &e),
     };
-    match run_zellij(session, &["action", "write-chars", "--pane-id", &pane, &text]) {
+    match run_zellij(
+        session,
+        &["action", "write-chars", "--pane-id", &pane, &text],
+    ) {
         Ok(out) if out.status.success() => 0,
         Ok(out) => {
             eprintln!("pz: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -397,7 +693,9 @@ fn cmd_ask(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
                 if i >= args.len() {
                     fail(2, "--timeout requires a value (milliseconds)");
                 }
-                timeout_ms = args[i].parse().unwrap_or_else(|_| fail(2, "--timeout must be a number of milliseconds"));
+                timeout_ms = args[i]
+                    .parse()
+                    .unwrap_or_else(|_| fail(2, "--timeout must be a number of milliseconds"));
             },
             a if a.starts_with("--") => fail(2, &format!("unknown flag '{a}' for ask")),
             _ => positional.push(&args[i]),
@@ -469,7 +767,11 @@ fn cmd_wait(session: &str, args: &[String]) -> i32 {
                 if i >= args.len() {
                     fail(2, "--timeout requires a value (milliseconds)");
                 }
-                timeout_ms = Some(args[i].parse().unwrap_or_else(|_| fail(2, "--timeout must be a number of milliseconds")));
+                timeout_ms = Some(
+                    args[i]
+                        .parse()
+                        .unwrap_or_else(|_| fail(2, "--timeout must be a number of milliseconds")),
+                );
             },
             a if a.starts_with("--") => fail(2, &format!("unknown flag '{a}' for wait")),
             _ => positional.push(&args[i]),
@@ -496,10 +798,13 @@ fn cmd_wait(session: &str, args: &[String]) -> i32 {
     };
     let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
 
-    let mut child = match zellij_cmd(session, &["subscribe", "--pane-id", &pane, "--format", "json"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+    let mut child = match zellij_cmd(
+        session,
+        &["subscribe", "--pane-id", &pane, "--format", "json"],
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
     {
         Ok(c) => c,
         Err(e) => fail(1, &format!("failed to run `zellij subscribe`: {e}")),
@@ -525,7 +830,10 @@ fn cmd_wait(session: &str, args: &[String]) -> i32 {
         match remaining {
             Some(rem) if rem.is_zero() => {
                 let _ = child.kill();
-                eprintln!("pz: wait for {pattern_desc} timed out after {} ms", timeout_ms.unwrap_or(0));
+                eprintln!(
+                    "pz: wait for {pattern_desc} timed out after {} ms",
+                    timeout_ms.unwrap_or(0)
+                );
                 return 1;
             },
             _ => {},
@@ -607,10 +915,15 @@ fn cmd_listen(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
     let channel = positional[0].clone();
     let hub_url = resolve_hub(hub_opt);
     let payload = serde_json::json!({"cmd": "listen", "channel": channel}).to_string();
-    let mut child = match zellij_cmd(session, &["pipe", "--plugin", &hub_url, "--name", &channel, "--", &payload])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut child = match zellij_cmd(
+        session,
+        &[
+            "pipe", "--plugin", &hub_url, "--name", &channel, "--", &payload,
+        ],
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
     {
         Ok(c) => c,
         Err(e) => fail(1, &format!("failed to run `zellij pipe`: {e}")),
@@ -668,9 +981,18 @@ fn cmd_status(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
     };
     let hub_url = resolve_hub(hub_opt);
     let payload = serde_json::json!({"cmd": "status", "target": pane}).to_string();
-    match hub_rpc(session, &hub_url, "status", &payload, Duration::from_secs(10)) {
+    match hub_rpc(
+        session,
+        &hub_url,
+        "status",
+        &payload,
+        Duration::from_secs(10),
+    ) {
         Ok(v) if v["ok"] == true => {
-            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
+            );
             0
         },
         Ok(v) => {
@@ -688,17 +1010,21 @@ fn cmd_targets(session: &str, args: &[String]) -> i32 {
         Err(e) => fail(1, &e),
     };
     if json {
-        println!("{}", serde_json::to_string_pretty(&panes).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&panes).unwrap_or_default()
+        );
         return 0;
     }
-    println!("PANE_ID      TAB_ID  TAB_NAME   FOCUSED  TITLE");
+    println!("PANE_ID      TAB_ID  TAB_NAME   FOCUSED  AGENT      TITLE");
     for p in &panes {
         println!(
-            "{:<12} {:<7} {:<10} {:<8} {}",
+            "{:<12} {:<7} {:<10} {:<8} {:<10} {}",
             pane_id_string(p),
             p.tab_id,
             p.tab_name,
             p.is_focused,
+            agent_kind(p).unwrap_or("-"),
             p.title
         );
     }
@@ -732,7 +1058,10 @@ fn main() {
                 println!("{USAGE}");
                 std::process::exit(0);
             },
-            a if a.starts_with("--") => fail(2, &format!("unknown flag '{a}' before subcommand (use --help)")),
+            a if a.starts_with("--") => fail(
+                2,
+                &format!("unknown flag '{a}' before subcommand (use --help)"),
+            ),
             _ => break, // subcommand starts here; pass the rest through untouched
         }
         i += 1;
@@ -818,5 +1147,72 @@ mod tests {
         let new = t.new_lines(&trimmed);
         assert_eq!(new, vec!["sh-5.3$ ready"]);
         assert!(Pattern::new("ready").unwrap().matches(new[0]));
+    }
+
+    const LS_OUTPUT: &str = "\
+session-a [Created 1h 0m 0s ago]
+marvellous-stegosaurus [Created 12m 34s ago] (current)
+pzdbg [Created 1h 11m 29s ago]
+quadratic-mountain [Created 2days 5h 52m 40s ago] (EXITED - attach to resurrect)
+";
+
+    #[test]
+    fn live_sessions_skips_exited_and_marks_current() {
+        let live = live_sessions(LS_OUTPUT);
+        assert_eq!(
+            live,
+            vec![
+                ("session-a".to_owned(), false),
+                ("marvellous-stegosaurus".to_owned(), true),
+                ("pzdbg".to_owned(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn live_sessions_strips_zellij_ansi_colors() {
+        let colored = "\x1b[32;1mmarvellous-stegosaurus\x1b[m [Created 1m ago] (current)\n";
+        assert_eq!(
+            live_sessions(colored),
+            vec![("marvellous-stegosaurus".to_owned(), true)]
+        );
+    }
+
+    #[test]
+    fn agent_kind_uses_command_and_title() {
+        let opencode = PaneEntry {
+            id: 1,
+            is_plugin: false,
+            is_focused: true,
+            tab_id: 0,
+            tab_name: "work".to_owned(),
+            title: "OC | task".to_owned(),
+            pane_command: Some("opencode2".to_owned()),
+        };
+        assert_eq!(agent_kind(&opencode), Some("opencode"));
+        assert!(agent_role_matches("oc", "opencode"));
+    }
+
+    #[test]
+    fn choose_session_prefers_live_env_name() {
+        let live = live_sessions(LS_OUTPUT);
+        assert_eq!(choose_session(Some("pzdbg"), &live).unwrap(), "pzdbg");
+    }
+
+    #[test]
+    fn choose_session_falls_back_from_stale_env_to_current() {
+        // opencode regression: env froze ZELLIJ_SESSION_NAME from a session that exited.
+        let live = live_sessions(LS_OUTPUT);
+        assert_eq!(
+            choose_session(Some("quadratic-mountain"), &live).unwrap(),
+            "marvellous-stegosaurus"
+        );
+    }
+
+    #[test]
+    fn choose_session_errors_on_multiple_live_without_current() {
+        let live = live_sessions("a [Created 1h 0m 0s ago]\nb [Created 1h 0m 0s ago]\n");
+        let err = choose_session(None, &live).unwrap_err();
+        assert!(err.contains("multiple active sessions"), "{err}");
     }
 }

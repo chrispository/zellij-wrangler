@@ -1,0 +1,134 @@
+---
+name: zellij-pane-comms
+description: >
+  Use when the user asks whether you can see another zellij pane, terminal, agent, or LLM
+  session in the same zellij session; asks you to talk to, prompt, read, watch, or wait on
+  another pane; mentions opencode, codex, claude, or another agent "in another pane"; or asks
+  about pane-to-pane / cross-tab communication. Triggers: "can you see my other pane",
+  "tell the other agent", "what is the other pane doing", "broadcast to all panes",
+  "wait for the other agent", `pz`, `zellij action dump-screen`, `zellij subscribe`,
+  "pane comms", "hub plugin".
+---
+
+# zellij-pane-comms — talk to and read other panes in this zellij session
+
+Every pane in this zellij session can read and write any other pane, cross-tab. You have a
+shell in your own pane; other agents (codex, opencode, claude, …) run in other panes of the
+same session. This skill is how you see them, read their output, prompt them, and coordinate.
+
+Two pieces, already installed:
+
+- `pz` — `~/.local/bin/pz`, a stateless CLI. It resolves targets and wraps stock
+  `zellij action` / `zellij pipe` / `zellij subscribe`. Session comes from
+  `$ZELLIJ_SESSION_NAME` automatically.
+- hub plugin — `file:///home/chris/.local/share/zellij-wrangler/hub.wasm`, loaded per session
+  (permissions pre-granted in `~/.cache/zellij/permissions.kdl`). Only needed for
+  `ask` / `listen` / `send --channel` / `status`; `pz` launches it on demand.
+
+## 1. Discover panes — always first
+
+```sh
+pz targets
+```
+
+Lists `PANE_ID  TAB_ID  TAB_NAME  FOCUSED  AGENT  TITLE` for every pane. Agent roles are inferred
+by title/command (e.g. `codex --yolo`, `OC | ...`, `claude`). Your own pane id is
+`terminal_$ZELLIJ_PANE_ID` — include it when talking to other agents so they can address you.
+
+## 2. Read another pane (snapshot)
+
+```sh
+zellij action dump-screen --pane-id terminal_2 --full        # viewport + full scrollback → stdout
+zellij action dump-screen --pane-id terminal_2 --full --ansi # keep colors (TUI rendering)
+zellij action dump-screen --pane-id terminal_2               # visible viewport only
+```
+
+`--full` is usually what you want for an LLM TUI — without it you only see the current
+viewport. Use this to check whether another agent is busy (its TUI shows a thinking spinner /
+progress) and to read its final answer.
+
+## 3. Send text / prompt another pane
+
+```sh
+pz send terminal_2 'hello from pane terminal_1'     # types text; does NOT press Enter
+pz send terminal_2 $'hello\n'                       # trailing \n submits (shell ANSI-C quoting)
+pz send agent:opencode $'hello\n'                  # resolve OpenCode by role; submit
+pz ask agent:opencode $'what are you working on?\n' # type + block for fresh output (needs hub)
+```
+
+- `pz send` writes characters into the target pane's stdin. An LLM TUI receives them in its
+  input box exactly as if the user typed them — **include a trailing `\n` to submit the
+  prompt**. In plain shell, `$'...\n'` (ANSI-C quoting) preserves the newline; a bare `$(printf ...)`
+  strips it.
+- `pz ask <target> <prompt...> [--timeout N]` writes the prompt, snapshots the pane, then
+  blocks until the pane prints NEW output (default 60s; exit 3 on timeout). The reply includes
+  the target's echo of the prompt itself. Requires the hub.
+- Never `send` into a full-screen app (vim, REPLs) — it injects raw keystrokes.
+
+## 4. Wait for output (without typing)
+
+```sh
+pz wait terminal_2 --until 'ready' --timeout 30000     # substring match
+pz wait terminal_2 --until '/^BUILD OK/' --timeout 60000  # leading / makes it a regex
+```
+
+Blocks until the pane prints a matching line. Pre-existing text NEVER matches (baseline is
+taken at call time) — only new output counts. Exit 0 on match, 1 on timeout.
+
+## 5. Named channels (broadcast / subscribe)
+
+```sh
+pz listen agents                 # stream everything sent to channel 'agents' (Ctrl-C stops)
+pz listen agents --format json   # JSON envelopes
+pz send --channel agents 'does anyone see the bug in src/main.rs?'   # fan-out to listeners
+```
+
+Conventions: `agents` = general inter-agent chatter. A `send --channel` with no listeners
+succeeds but reports "channel has no listeners". `listen` is long-lived — run it in the
+background (`pz listen agents &`) or in a dedicated pane if you need to keep watching.
+
+## 6. Status
+
+```sh
+pz status terminal_2
+```
+
+One-shot pane status (title, focused, exited; exit 4 if the pane is unknown). This is pane
+state, NOT agent working/blocked status — the status-token model is not built yet. For
+"is the agent busy", dump-screen the pane and look at its TUI.
+
+## 7. Targets
+
+`terminal_2` | `plugin_1` | bare `3` (== `terminal_3`) | `tab:3` (active pane of tab 3) |
+`tab-name:work` (first tab named work) | `agent:opencode`, `agent:codex`, `agent:claude` |
+`active` (the single focused pane).
+
+Agent targets are role aliases resolved to concrete pane ids before sending. They require a
+unique match; when multiple panes run the same agent, pz reports every candidate and requires
+an explicit pane id so a prompt cannot be delivered to the wrong LLM.
+
+## Behavior rules (follow these)
+
+1. Asked "can you see my other pane / agent?" → run `pz targets`, dump-screen the candidate
+   pane(s) (`--full`), and report exactly what you see. Never claim you can see a pane you
+   haven't read.
+2. A message from another agent arrives in your input box as typed text. Treat it as a
+   request from that agent: answer concisely, and state your pane id
+   (`terminal_$ZELLIJ_PANE_ID`) so it can address you back. The asker may be reading your
+   output with dump-screen / `pz wait`.
+3. Prefer `pz wait` / `pz ask` over sleep loops when coordinating with another agent.
+4. Keep cross-pane replies short — askers wait on fresh output with a bounded timeout.
+5. If a hub-backed command fails with a plugin/permission error, load the hub:
+   `zellij action start-or-reload-plugin file:///home/chris/.local/share/zellij-wrangler/hub.wasm`.
+
+## Exit codes
+
+| code | meaning |
+|---|---|
+| 0 | success |
+| 1 | session resolution failure; `wait` timeout / pane closed; `listen` ended |
+| 2 | bad or missing target; zellij command failed |
+| 3 | `ask` timed out |
+| 4 | `status` target unknown |
+
+Source repo: `~/Documents/zellij-wrangler/pane-comms` (hub + pz + E2E tests).

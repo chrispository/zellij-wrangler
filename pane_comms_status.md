@@ -81,11 +81,34 @@ All previously-open failures are fixed. The E2E now passes end-to-end on stock z
 - **`pane-comms/README.md`**, `layouts/e2e.kdl`, `layouts/e2e-config.kdl` (README updated:
   NDJSON termination + `event:"ack"` on the listen ack documented).
 
+## Installed for real use (2026-08-16)
+
+- **`pz`** → `~/.local/bin/pz` (on PATH). Rebuilt with `default_hub_url` patched to prefer
+  `~/.local/share/zellij-wrangler/hub.wasm` (installed layout) before the cargo candidates;
+  `$PZ_HUB_URL` still overrides.
+- **`hub.wasm`** → `~/.local/share/zellij-wrangler/hub.wasm`.
+- **Permissions** pre-seeded in `~/.cache/zellij/permissions.kdl` for the installed path
+  (same 4 permissions as the E2E heredoc) — hub loads without the UI prompt.
+- **Agent skill**: `pane-comms/skills/zellij-pane-comms/SKILL.md` (canonical, in-repo so it
+  can be reviewed/pushed). Installed via symlinks:
+  `~/.agents/skills/zellij-pane-comms` → repo copy,
+  `~/.codex/skills/zellij-pane-comms` and `~/.config/opencode/skills/zellij-pane-comms` →
+  that. `git push` updates every installed agent.
+- **Verified live** in the user's session: `pz targets`/`status` (hub auto-launch), 
+  `dump-screen --full` reads both agent panes, `pz send --channel` → `pz listen` round-trip
+  (delivered to 1 listener, exit 0).
+- **Deterministic agent glue** (skill activation alone is retrieval-based, not guaranteed):
+  `~/.codex/AGENTS.md` gained a "Pane comms (zellij)" section (always loaded at startup);
+  `~/.config/opencode/opencode.json` gained `"instructions": [...zellij-pane-comms/SKILL.md]`
+  (always loaded at startup).
+
+Note: the running codex/opencode TUIs load skills at startup — restart the agent pane to pick
+up the new skill.
+
 ## Remaining (optional / out of scope unless asked)
 
 - Layout-based hub pre-load (`run_plugin` in `layouts/e2e.kdl` — makes the plugin pane exist
   before any pipe, sidestepping the screen's permission-request caching).
-- `pz` install script / PATH.
 - Spec's upstream PR candidates (fork/upstream route, M5 status-token model).
 
 ## Commands

@@ -29,6 +29,42 @@ cargo build -p pz                                      # -> target/debug/pz
 The hub is pinned to `zellij-tile = "=0.44.3"` (matches zellij 0.44.x, the tested floor).
 Pipes require zellij ≥ 0.40.
 
+## Install (real use)
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+cargo build -p hub --target wasm32-wasip1 --release
+cargo build -p pz
+cp target/wasm32-wasip1/release/hub.wasm ~/.local/share/zellij-wrangler/hub.wasm
+cp target/debug/pz ~/.local/bin/pz
+```
+
+`pz` auto-discovers the installed hub at `~/.local/share/zellij-wrangler/hub.wasm`
+(`$PZ_HUB_URL` overrides). Then seed the permissions cache once (see below), and install the
+agent skill:
+
+```sh
+ln -s ~/Documents/zellij-wrangler/pane-comms/skills/zellij-pane-comms ~/.agents/skills/zellij-pane-comms
+ln -s ~/.agents/skills/zellij-pane-comms ~/.codex/skills/zellij-pane-comms
+ln -s ~/.agents/skills/zellij-pane-comms ~/.config/opencode/skills/zellij-pane-comms
+```
+
+The skill (`skills/zellij-pane-comms/SKILL.md`) teaches codex/opencode/claude agents in other
+panes how to discover, read, prompt, and wait on each other. It is the canonical copy —
+`~/.agents/skills` and each agent's skill dir symlink back to it, so a git push updates every
+installed agent.
+
+Skill activation alone is retrieval-based (the agent sees the skill's description and decides
+to read it) — usually enough, not guaranteed. The always-loaded glue makes it deterministic:
+
+- **codex**: `~/.codex/AGENTS.md` carries a "Pane comms (zellij)" section pointing at the
+  skill (AGENTS.md is loaded into every codex session at startup).
+- **opencode**: `~/.config/opencode/opencode.json` has
+  `"instructions": ["/home/chris/.agents/skills/zellij-pane-comms/SKILL.md"]`, which loads the
+  skill unconditionally at startup (config `instructions` field).
+
+Agents already running must be restarted to pick up either change.
+
 ## Load the hub + grant permissions
 
 The hub requests `ReadCliPipes`, `WriteToStdin`, `ReadPaneContents`, and
@@ -65,11 +101,18 @@ pz ask <target> <prompt...> [--timeout N]   # prompt, block until the pane print
 pz wait <target> --until <pat> [--timeout N]  # block until output matches (substring or /regex/)
 pz listen <channel> [--format raw|json]  # stream a channel (Ctrl-C stops)
 pz status <target>                     # one-shot pane status (title/focused/exited)
-pz targets [--json]                    # list panes with tab ids/names
+pz targets [--json]                    # list panes with tab ids/names and inferred agent roles
 ```
 
 Targets: `terminal_2` | `plugin_1` | `3` (bare == `terminal_3`) | `tab:3` | `tab-name:work`
-(first match wins; tab names are not unique) | `active` (the single focused pane).
+(first match wins; tab names are not unique) | `agent:opencode` / `agent:codex` / `agent:claude`
+| `active` (the single focused pane).
+
+`agent:NAME` is resolved client-side from the pane command/title and must match exactly one
+agent pane. For example, `pz send agent:opencode $'Please inspect the failing test.\n'`
+types and submits a prompt to the OpenCode pane. If two panes run the same agent (for example,
+two Codex panes), pz refuses to guess and lists the concrete pane ids; use that id for the
+intended recipient.
 
 Session: `$ZELLIJ_SESSION_NAME` (inside zellij), else the single active `zellij ls` session,
 else `--session <name>`.
