@@ -110,7 +110,10 @@ impl Hub {
                 unblock_cli_pipe_input(pipe_id);
             },
             Err(e) => {
-                cli_pipe_output(pipe_id, &format!(r#"{{"ok":false,"error":"reply serialization failed: {e}"}}"#));
+                cli_pipe_output(
+                    pipe_id,
+                    &format!(r#"{{"ok":false,"error":"reply serialization failed: {e}"}}"#),
+                );
                 unblock_cli_pipe_input(pipe_id);
             },
         }
@@ -123,8 +126,9 @@ impl Hub {
     }
 
     fn parse_pane_id(spec: &str) -> Result<PaneId, String> {
-        spec.parse::<PaneId>()
-            .map_err(|_| format!("malformed pane id '{spec}' (expected terminal_N, plugin_N, or a bare number)"))
+        spec.parse::<PaneId>().map_err(|_| {
+            format!("malformed pane id '{spec}' (expected terminal_N, plugin_N, or a bare number)")
+        })
     }
 
     fn handle(&mut self, pipe_id: &str, req: Request) {
@@ -154,11 +158,7 @@ impl Hub {
                 }
                 let reply = match subscribers.len() {
                     0 => Reply::ok("channel has no listeners", "channel", None),
-                    n => Reply::ok(
-                        format!("delivered to {n} listener(s)"),
-                        "channel",
-                        None,
-                    ),
+                    n => Reply::ok(format!("delivered to {n} listener(s)"), "channel", None),
                 };
                 self.reply(pipe_id, reply);
             },
@@ -222,10 +222,7 @@ impl Hub {
                 let baseline = match get_pane_scrollback(target, true) {
                     Ok(contents) => pane_contents_to_lines(contents),
                     Err(_) => {
-                        self.reply(
-                            pipe_id,
-                            Reply::err(format!("pane {target_spec} not found")),
-                        );
+                        self.reply(pipe_id, Reply::err(format!("pane {target_spec} not found")));
                         return;
                     },
                 };
@@ -281,7 +278,8 @@ impl Hub {
                         serde_json::json!({"channel": name, "subscribers": subs.len()})
                     })
                     .collect();
-                let reply = serde_json::json!({"ok": true, "reply_type": "channels", "channels": dump});
+                let reply =
+                    serde_json::json!({"ok": true, "reply_type": "channels", "channels": dump});
                 let _ = serde_json::to_string(&reply).map(|json| {
                     cli_pipe_output(pipe_id, &format!("{json}\n"));
                     unblock_cli_pipe_input(pipe_id);
@@ -306,7 +304,10 @@ impl Hub {
                     let current = pane_contents_to_lines(contents);
                     let new_lines = new_lines_after(&ask.baseline, &current);
                     if !new_lines.is_empty() {
-                        done.push((pipe_id.clone(), Reply::ok(new_lines.join("\n"), "output", None)));
+                        done.push((
+                            pipe_id.clone(),
+                            Reply::ok(new_lines.join("\n"), "output", None),
+                        ));
                         continue;
                     }
                     if ask.ticks_left == 0 {
@@ -389,17 +390,17 @@ impl ZellijPlugin for Hub {
         let payload = match &pipe_message.payload {
             Some(p) => p.clone(),
             None => {
-                self.reply(&pipe_id, Reply::err("empty payload (expected a JSON request)"));
+                self.reply(
+                    &pipe_id,
+                    Reply::err("empty payload (expected a JSON request)"),
+                );
                 return false;
             },
         };
         let req: Request = match serde_json::from_str(&payload) {
             Ok(req) => req,
             Err(e) => {
-                self.reply(
-                    &pipe_id,
-                    Reply::err(format!("malformed request: {e}")),
-                );
+                self.reply(&pipe_id, Reply::err(format!("malformed request: {e}")));
                 return false;
             },
         };

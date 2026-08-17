@@ -1,5 +1,59 @@
 # pane-comms — cross-pane & cross-tab communication for zellij
 
+## Agent-aware prompting
+
+`pane-comms` can prompt another LLM as if you typed into its Zellij pane. Agent names are
+resolved from the live pane command and title on every invocation, so they do not depend on
+fixed pane numbers or tab names such as `Tab #1`.
+
+Built-in agent profiles recognize:
+
+```text
+claude, codex, antigravity, opencode (including opencode2+), crush,
+pi, omp, hermes, vibe, z-code (and zcode)
+```
+
+Use the friendly name directly:
+
+```sh
+pz send codex $'Please review the failing test.\n'
+pz ask opencode $'What are you working on?\n'
+pz send other:codex $'Coordinate with the other Codex pane.\n'
+```
+
+The trailing newline submits the prompt. `pz` writes the text through the target pane's PTY and
+turns that final newline into Zellij's explicit `Enter` key action, which works with full-screen
+agent TUIs as well as ordinary shells.
+
+If a name matches more than one pane, `pz` refuses to guess and lists each candidate's pane id,
+tab number/name, working directory, and command. The calling agent should ask the user which
+candidate to use, then retry with the selected concrete pane id. `other:NAME` excludes the
+calling pane from the search.
+
+Discover the current matches with:
+
+```sh
+pz agents
+pz agents --json
+```
+
+Common profiles are built in, but custom wrappers can be added in
+`$XDG_CONFIG_HOME/pane-comms/agents.toml` (or `~/.config/pane-comms/agents.toml`):
+
+```toml
+[agents.my-codex]
+commands = ["my-codex-wrapper"]
+aliases = ["backend-codex"]
+titles = ["Backend Codex"]
+
+[agents.opencode]
+commands = ["opencode-beta"]
+aliases = ["oc"]
+```
+
+Set `PZ_AGENTS_CONFIG` to use a different config file. Config entries with a built-in name
+extend that profile; new names add custom profiles.
+
 Let panes (and tabs) exchange data directly: any pane can send input to any other pane, read
 any other pane, and join named channels — **without forking zellij**. Three artifacts in this
 directory, running on stock zellij:
@@ -44,12 +98,12 @@ cp target/debug/pz ~/.local/bin/pz
 agent skill:
 
 ```sh
-ln -s ~/Documents/zellij-wrangler/pane-comms/skills/zellij-pane-comms ~/.agents/skills/zellij-pane-comms
-ln -s ~/.agents/skills/zellij-pane-comms ~/.codex/skills/zellij-pane-comms
-ln -s ~/.agents/skills/zellij-pane-comms ~/.config/opencode/skills/zellij-pane-comms
+ln -s ~/Documents/zellij-wrangler/pane-comms/skills/zellij-wrangler ~/.agents/skills/zellij-wrangler
+ln -s ~/.agents/skills/zellij-wrangler ~/.codex/skills/zellij-wrangler
+ln -s ~/.agents/skills/zellij-wrangler ~/.config/opencode/skills/zellij-wrangler
 ```
 
-The skill (`skills/zellij-pane-comms/SKILL.md`) teaches codex/opencode/claude agents in other
+The skill (`skills/zellij-wrangler/SKILL.md`) teaches codex/opencode/claude agents in other
 panes how to discover, read, prompt, and wait on each other. It is the canonical copy —
 `~/.agents/skills` and each agent's skill dir symlink back to it, so a git push updates every
 installed agent.
@@ -60,7 +114,7 @@ to read it) — usually enough, not guaranteed. The always-loaded glue makes it 
 - **codex**: `~/.codex/AGENTS.md` carries a "Pane comms (zellij)" section pointing at the
   skill (AGENTS.md is loaded into every codex session at startup).
 - **opencode**: `~/.config/opencode/opencode.json` has
-  `"instructions": ["/home/chris/.agents/skills/zellij-pane-comms/SKILL.md"]`, which loads the
+  `"instructions": ["/home/chris/.agents/skills/zellij-wrangler/SKILL.md"]`, which loads the
   skill unconditionally at startup (config `instructions` field).
 
 Agents already running must be restarted to pick up either change.
@@ -102,17 +156,16 @@ pz wait <target> --until <pat> [--timeout N]  # block until output matches (subs
 pz listen <channel> [--format raw|json]  # stream a channel (Ctrl-C stops)
 pz status <target>                     # one-shot pane status (title/focused/exited)
 pz targets [--json]                    # list panes with tab ids/names and inferred agent roles
+pz agents [--json]                     # list discovered agent panes and selectors
 ```
 
 Targets: `terminal_2` | `plugin_1` | `3` (bare == `terminal_3`) | `tab:3` | `tab-name:work`
-(first match wins; tab names are not unique) | `agent:opencode` / `agent:codex` / `agent:claude`
-| `active` (the single focused pane).
+(first match wins; tab names are not unique) | `agent:NAME` / `NAME` | `other:NAME` |
+`active` (the single focused pane).
 
-`agent:NAME` is resolved client-side from the pane command/title and must match exactly one
-agent pane. For example, `pz send agent:opencode $'Please inspect the failing test.\n'`
-types and submits a prompt to the OpenCode pane. If two panes run the same agent (for example,
-two Codex panes), pz refuses to guess and lists the concrete pane ids; use that id for the
-intended recipient.
+Agent targets are resolved client-side from the live pane command/title and must match exactly
+one agent pane. `NAME` is shorthand for `agent:NAME`. If two panes run the same agent, pz
+refuses to guess and lists the concrete pane ids; use the intended id for the recipient.
 
 Session: `$ZELLIJ_SESSION_NAME` (inside zellij), else the single active `zellij ls` session,
 else `--session <name>`.

@@ -132,7 +132,7 @@ expect_wait_match() { # desc until-pattern pane marker
     ( sleep 1.5; "$PZ" --session "$SESSION" send "$pane" "$marker" >/dev/null 2>&1 ) &
     check "$desc" 0 "$PZ" --session "$SESSION" wait "$pane" --until "$until" --timeout 8000
 }
-expect_wait_match "wait until substring matches" READY-NOW "$PANE_A" "READY-NOW"
+expect_wait_match "wait until substring matches" READY-NOW "$PANE_A" $'\necho READY-NOW\n'
 # A regex anchored at line start can only match real command output, not the prompt line, so
 # the marker is delivered as `echo ...` and matched against its output. ANSI-C quoting keeps
 # the newlines: $(printf '...\n') would strip trailing newlines (command substitution). The

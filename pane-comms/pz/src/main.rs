@@ -14,7 +14,9 @@
 
 use regex::Regex;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
@@ -39,13 +41,15 @@ COMMANDS:
     listen <channel> [--format raw|json]
                                         Stream everything sent to a named channel (Ctrl-C stops)
     status <target>                     One-shot status of a pane (title, focused, exited)
-    targets [--json]                    List panes with their tab ids / names
+    targets [--json]                    List panes with their tab ids / names and agent roles
+    agents [--json]                     List discovered agent panes and their selectors
 
 TARGETS (resolved client-side via `zellij action list-panes --json`):
     terminal_2 | plugin_1 | 3          explicit pane id (bare number == terminal_N)
     tab:3                              the active pane of tab 3 (focused, else first terminal)
     tab-name:work                      first tab named \"work\" (names are not unique)
-    agent:opencode                     the unique pane running OpenCode (codex/claude too)
+    agent:NAME | NAME                   the unique matching agent pane (e.g. codex, opencode)
+    other:NAME                          matching agent panes except the caller's own pane
     active                             the single focused pane
 
 EXIT CODES: 0 ok, 1 session/timeout, 2 bad target, 3 ask timeout, 4 status unknown.
@@ -63,6 +67,8 @@ struct PaneEntry {
     title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pane_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pane_cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,12 +77,272 @@ struct TabEntry {
     name: String,
 }
 
+#[derive(Clone, Debug)]
+struct AgentProfile {
+    name: String,
+    aliases: Vec<String>,
+    commands: Vec<String>,
+    title_markers: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AgentConfigFile {
+    #[serde(default)]
+    agents: BTreeMap<String, AgentConfig>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AgentConfig {
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    commands: Vec<String>,
+    #[serde(default)]
+    titles: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct AgentCandidate {
+    agent: String,
+    pane_id: String,
+    tab_id: u32,
+    tab_name: String,
+    focused: bool,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
+}
+
 fn pane_id_string(e: &PaneEntry) -> String {
     format!(
         "{}{}",
         if e.is_plugin { "plugin_" } else { "terminal_" },
         e.id
     )
+}
+
+fn agent_profile(
+    name: &str,
+    aliases: &[&str],
+    commands: &[&str],
+    title_markers: &[&str],
+) -> AgentProfile {
+    AgentProfile {
+        name: name.to_owned(),
+        aliases: aliases
+            .iter()
+            .map(|value| value.to_ascii_lowercase())
+            .collect(),
+        commands: commands
+            .iter()
+            .map(|value| value.to_ascii_lowercase())
+            .collect(),
+        title_markers: title_markers
+            .iter()
+            .map(|value| value.to_ascii_lowercase())
+            .collect(),
+    }
+}
+
+/// Profiles for common agent CLIs. These are deliberately command/title based and do not depend
+/// on tab names, pane numbers, or a particular user's layout.
+fn builtin_agent_profiles() -> Vec<AgentProfile> {
+    vec![
+        agent_profile("claude", &[], &["claude"], &["claude"]),
+        agent_profile("codex", &[], &["codex"], &["codex"]),
+        agent_profile("antigravity", &[], &["antigravity"], &["antigravity"]),
+        agent_profile(
+            "opencode",
+            &["oc"],
+            &["opencode", "opencode*"],
+            &["oc |", "opencode"],
+        ),
+        agent_profile("crush", &[], &["crush"], &["crush"]),
+        agent_profile("pi", &[], &["pi"], &["pi"]),
+        agent_profile("omp", &[], &["omp"], &["omp"]),
+        agent_profile("hermes", &[], &["hermes"], &["hermes"]),
+        agent_profile("vibe", &[], &["vibe"], &["vibe"]),
+        agent_profile(
+            "z-code",
+            &["zcode"],
+            &["z-code", "zcode"],
+            &["z-code", "zcode"],
+        ),
+    ]
+}
+
+fn add_unique(values: &mut Vec<String>, additions: impl IntoIterator<Item = String>) {
+    for value in additions {
+        if !values.iter().any(|existing| existing == &value) {
+            values.push(value);
+        }
+    }
+}
+
+fn merge_agent_config(profiles: &mut Vec<AgentProfile>, config: AgentConfigFile) {
+    for (name, agent) in config.agents {
+        let normalized_name = name.trim().to_ascii_lowercase();
+        if let Some(existing) = profiles
+            .iter_mut()
+            .find(|profile| profile.name == normalized_name)
+        {
+            add_unique(
+                &mut existing.aliases,
+                agent
+                    .aliases
+                    .into_iter()
+                    .map(|value| value.trim().to_ascii_lowercase()),
+            );
+            add_unique(
+                &mut existing.commands,
+                agent
+                    .commands
+                    .into_iter()
+                    .map(|value| value.trim().to_ascii_lowercase()),
+            );
+            add_unique(
+                &mut existing.title_markers,
+                agent
+                    .titles
+                    .into_iter()
+                    .map(|value| value.trim().to_ascii_lowercase()),
+            );
+        } else {
+            profiles.push(AgentProfile {
+                name: normalized_name,
+                aliases: agent
+                    .aliases
+                    .into_iter()
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .collect(),
+                commands: agent
+                    .commands
+                    .into_iter()
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .collect(),
+                title_markers: agent
+                    .titles
+                    .into_iter()
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .collect(),
+            });
+        }
+    }
+}
+
+fn agent_config_path() -> Option<PathBuf> {
+    if let Ok(path) = env::var("PZ_AGENTS_CONFIG") {
+        if !path.trim().is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+    let config_home = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(config_home.join("pane-comms").join("agents.toml"))
+}
+
+fn load_agent_profiles() -> Result<Vec<AgentProfile>, String> {
+    let mut profiles = builtin_agent_profiles();
+    let Some(path) = agent_config_path() else {
+        return Ok(profiles);
+    };
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(profiles),
+        Err(error) => {
+            return Err(format!(
+                "could not read agent config {}: {error}",
+                path.display()
+            ))
+        },
+    };
+    let config: AgentConfigFile = toml::from_str(&contents)
+        .map_err(|error| format!("could not parse agent config {}: {error}", path.display()))?;
+    merge_agent_config(&mut profiles, config);
+    Ok(profiles)
+}
+
+fn executable_name(command: &str) -> Option<String> {
+    let token = command.split_whitespace().next()?.trim_matches(['\'', '"']);
+    PathBuf::from(token)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
+}
+
+fn command_matches(pattern: &str, executable: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        executable.starts_with(prefix)
+    } else {
+        pattern == executable
+    }
+}
+
+fn title_matches_marker(title: &str, marker: &str) -> bool {
+    if marker
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        title
+            .split(|character: char| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+            })
+            .any(|token| token == marker)
+    } else {
+        title.contains(marker)
+    }
+}
+
+fn pane_matches_profile(pane: &PaneEntry, profile: &AgentProfile) -> bool {
+    let command_match = pane
+        .pane_command
+        .as_deref()
+        .and_then(executable_name)
+        .is_some_and(|executable| {
+            profile
+                .commands
+                .iter()
+                .any(|pattern| command_matches(pattern, &executable))
+        });
+    let title = pane.title.to_ascii_lowercase();
+    command_match
+        || profile
+            .title_markers
+            .iter()
+            .any(|marker| !marker.is_empty() && title_matches_marker(&title, marker))
+}
+
+fn profile_matches_role(profile: &AgentProfile, role: &str) -> bool {
+    let role = role.trim().to_ascii_lowercase();
+    profile.name == role || profile.aliases.iter().any(|alias| alias == &role)
+}
+
+fn profile_for_pane<'a>(
+    pane: &PaneEntry,
+    profiles: &'a [AgentProfile],
+) -> Option<&'a AgentProfile> {
+    if pane.is_plugin {
+        return None;
+    }
+    profiles
+        .iter()
+        .find(|profile| pane_matches_profile(pane, profile))
+}
+
+fn candidate_for_pane(pane: &PaneEntry, profile: &AgentProfile) -> AgentCandidate {
+    AgentCandidate {
+        agent: profile.name.clone(),
+        pane_id: pane_id_string(pane),
+        tab_id: pane.tab_id,
+        tab_name: pane.tab_name.clone(),
+        focused: pane.is_focused,
+        title: pane.title.clone(),
+        command: pane.pane_command.clone(),
+        cwd: pane.pane_cwd.clone(),
+    }
 }
 
 /// Remove ANSI CSI styling from `zellij ls` output. Zellij currently colorizes session
@@ -122,6 +388,19 @@ fn run_zellij(session: &str, args: &[&str]) -> Result<std::process::Output, Stri
     zellij_cmd(session, args)
         .output()
         .map_err(|e| format!("failed to run zellij: {e}"))
+}
+
+/// A trailing line ending means "submit" to a human-facing prompt. Keep any earlier line
+/// endings as text, but use Zellij's key action for the final one: some full-screen TUIs render
+/// an injected LF without dispatching the Enter key that submits their input box.
+fn split_submit_text(text: &str) -> (&str, bool) {
+    if let Some(body) = text.strip_suffix("\r\n") {
+        (body, true)
+    } else if let Some(body) = text.strip_suffix('\n') {
+        (body, true)
+    } else {
+        (text, false)
+    }
 }
 
 /// Parse `zellij ls` output into `(name, is_current)` pairs, skipping EXITED sessions.
@@ -297,9 +576,6 @@ fn list_tabs(session: &str) -> Result<Vec<TabEntry>, String> {
 
 /// Resolve a target spec to a concrete pane id string ("terminal_N" / "plugin_N").
 fn resolve_target(session: &str, spec: &str) -> Result<String, String> {
-    if let Some(role) = spec.strip_prefix("agent:") {
-        return resolve_agent_target(session, role);
-    }
     // Explicit pane ids pass through — but only if the pane actually exists. (0.44.3's
     // `write-chars` silently succeeds for missing panes, so pz validates client-side.)
     let explicit = Regex::new(r"^(terminal_\d+|plugin_\d+)$").unwrap();
@@ -355,92 +631,88 @@ fn resolve_target(session: &str, spec: &str) -> Result<String, String> {
             )),
         };
     }
-    Err(format!(
-        "unknown target '{spec}' (expected terminal_N, plugin_N, N, tab:N, tab-name:NAME, agent:NAME, or active)"
-    ))
+    resolve_agent_target(session, spec)
 }
 
-/// Infer a stable agent role from the pane command. Pane titles are useful as a fallback (for
-/// example `OC | ...`), but commands are the primary signal because titles often change while
-/// an agent is running.
-fn agent_kind(pane: &PaneEntry) -> Option<&'static str> {
-    if pane.is_plugin {
-        return None;
-    }
-    let command = pane
-        .pane_command
-        .as_deref()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let title = pane.title.to_ascii_lowercase();
-    if command.contains("opencode") || title.starts_with("oc |") {
-        Some("opencode")
-    } else if command.contains("codex") {
-        Some("codex")
-    } else if command.contains("claude") {
-        Some("claude")
+fn split_agent_spec(spec: &str) -> (bool, &str) {
+    let (exclude_self, role) = if let Some(role) = spec.strip_prefix("other:") {
+        (true, role)
     } else {
-        None
-    }
+        (false, spec)
+    };
+    (exclude_self, role.strip_prefix("agent:").unwrap_or(role))
 }
 
-fn agent_role_matches(role: &str, kind: &str) -> bool {
-    match role.trim().to_ascii_lowercase().as_str() {
-        "opencode" | "open-code" | "oc" => kind == "opencode",
-        "codex" => kind == "codex",
-        "claude" => kind == "claude",
-        _ => false,
-    }
+fn discover_agents(panes: &[PaneEntry], profiles: &[AgentProfile]) -> Vec<AgentCandidate> {
+    panes
+        .iter()
+        .filter_map(|pane| {
+            profile_for_pane(pane, profiles).map(|profile| candidate_for_pane(pane, profile))
+        })
+        .collect()
+}
+
+fn candidate_description(candidate: &AgentCandidate) -> String {
+    let cwd = candidate.cwd.as_deref().unwrap_or("cwd unknown");
+    let command = candidate.command.as_deref().unwrap_or("command unknown");
+    format!(
+        "{} — tab {} {:?} — {} — {}",
+        candidate.pane_id, candidate.tab_id, candidate.tab_name, cwd, command
+    )
 }
 
 /// Resolve an agent role to a pane. Role targets intentionally require a unique match: silently
-/// choosing one of two Codex panes would send a prompt to the wrong agent. The error lists the
-/// candidates so the caller can choose a concrete pane id.
-fn resolve_agent_target(session: &str, role: &str) -> Result<String, String> {
+/// choosing one of two identical agents would send a prompt to the wrong pane. The error lists
+/// candidates so an LLM or human can ask which one to use.
+fn resolve_agent_target(session: &str, spec: &str) -> Result<String, String> {
+    let (exclude_self, role) = split_agent_spec(spec);
     let role = role.trim();
     if role.is_empty() {
-        return Err(
-            "empty agent role (use agent:opencode, agent:codex, or agent:claude)".to_owned(),
-        );
+        return Err("empty agent role (use codex, opencode, agent:NAME, or other:NAME)".to_owned());
     }
-    let panes = list_panes(session)?;
-    let candidates: Vec<&PaneEntry> = panes
+    let profiles = load_agent_profiles()?;
+    let profile = profiles
         .iter()
-        .filter(|pane| agent_kind(pane).is_some_and(|kind| agent_role_matches(role, kind)))
+        .find(|profile| profile_matches_role(profile, role))
+        .ok_or_else(|| {
+            let names = profiles
+                .iter()
+                .map(|profile| profile.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("unknown agent '{role}' (known agents: {names})")
+        })?;
+    let panes = list_panes(session)?;
+    let own_pane_id = env::var("ZELLIJ_PANE_ID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok());
+    let candidates: Vec<AgentCandidate> = panes
+        .iter()
+        .filter(|pane| {
+            !(exclude_self && own_pane_id == Some(pane.id)) && pane_matches_profile(pane, profile)
+        })
+        .map(|pane| candidate_for_pane(pane, profile))
         .collect();
     match candidates.as_slice() {
-        [pane] => Ok(pane_id_string(pane)),
+        [candidate] => Ok(candidate.pane_id.clone()),
         [] => {
-            let available = panes
-                .iter()
-                .filter_map(|pane| {
-                    agent_kind(pane).map(|kind| format!("agent:{kind}={}", pane_id_string(pane)))
-                })
-                .collect::<Vec<_>>();
-            if available.is_empty() {
-                Err(format!("no agent '{role}' found"))
+            if exclude_self {
+                Err(format!("no other '{role}' agent pane found"))
             } else {
-                Err(format!(
-                    "no agent '{role}' found (available: {})",
-                    available.join(", ")
-                ))
+                Err(format!("no '{role}' agent pane found"))
             }
         },
         many => {
-            let candidates = many
+            let descriptions = many
                 .iter()
-                .map(|pane| {
-                    format!(
-                        "{} (tab {}: {})",
-                        pane_id_string(pane),
-                        pane.tab_id,
-                        pane.title
-                    )
+                .enumerate()
+                .map(|(index, candidate)| {
+                    format!("{}. {}", index + 1, candidate_description(candidate))
                 })
                 .collect::<Vec<_>>()
-                .join(", ");
+                .join("\n");
             Err(format!(
-                "agent '{role}' is ambiguous: {candidates}; use a concrete pane id"
+                "agent '{role}' matches multiple panes: {descriptions}; choose one with a concrete pane id"
             ))
         },
     }
@@ -669,17 +941,35 @@ fn cmd_send(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
         Ok(p) => p,
         Err(e) => fail(2, &e),
     };
-    match run_zellij(
-        session,
-        &["action", "write-chars", "--pane-id", &pane, &text],
-    ) {
-        Ok(out) if out.status.success() => 0,
-        Ok(out) => {
-            eprintln!("pz: {}", String::from_utf8_lossy(&out.stderr).trim());
-            2
-        },
-        Err(e) => fail(2, &e),
+
+    let (body, submit) = split_submit_text(&text);
+    if !body.is_empty() {
+        match run_zellij(
+            session,
+            &["action", "write-chars", "--pane-id", &pane, body],
+        ) {
+            Ok(out) if out.status.success() => {},
+            Ok(out) => {
+                eprintln!("pz: {}", String::from_utf8_lossy(&out.stderr).trim());
+                return 2;
+            },
+            Err(e) => fail(2, &e),
+        }
     }
+    if submit {
+        match run_zellij(
+            session,
+            &["action", "send-keys", "--pane-id", &pane, "Enter"],
+        ) {
+            Ok(out) if out.status.success() => {},
+            Ok(out) => {
+                eprintln!("pz: {}", String::from_utf8_lossy(&out.stderr).trim());
+                return 2;
+            },
+            Err(e) => fail(2, &e),
+        }
+    }
+    0
 }
 
 fn cmd_ask(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
@@ -1016,16 +1306,60 @@ fn cmd_targets(session: &str, args: &[String]) -> i32 {
         );
         return 0;
     }
+    let profiles = match load_agent_profiles() {
+        Ok(profiles) => profiles,
+        Err(error) => fail(1, &error),
+    };
     println!("PANE_ID      TAB_ID  TAB_NAME   FOCUSED  AGENT      TITLE");
     for p in &panes {
+        let agent = profile_for_pane(p, &profiles)
+            .map(|profile| profile.name.as_str())
+            .unwrap_or("-");
         println!(
             "{:<12} {:<7} {:<10} {:<8} {:<10} {}",
             pane_id_string(p),
             p.tab_id,
             p.tab_name,
             p.is_focused,
-            agent_kind(p).unwrap_or("-"),
+            agent,
             p.title
+        );
+    }
+    0
+}
+
+fn cmd_agents(session: &str, args: &[String]) -> i32 {
+    let json = args.iter().any(|arg| arg == "--json");
+    if args.iter().any(|arg| arg != "--json") {
+        fail(2, "usage: pz agents [--json]");
+    }
+    let profiles = match load_agent_profiles() {
+        Ok(profiles) => profiles,
+        Err(error) => fail(1, &error),
+    };
+    let panes = match list_panes(session) {
+        Ok(panes) => panes,
+        Err(error) => fail(1, &error),
+    };
+    let agents = discover_agents(&panes, &profiles);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&agents).unwrap_or_default()
+        );
+        return 0;
+    }
+    println!("AGENT       PANE_ID      TAB_ID  TAB_NAME   FOCUSED  CWD  TITLE");
+    for agent in agents {
+        println!(
+            "{:<11} {:<12} {:<7} {:<10} {:<8} {:<4} {}",
+            agent.agent,
+            agent.pane_id,
+            agent.tab_id,
+            agent.tab_name,
+            agent.focused,
+            agent.cwd.as_deref().unwrap_or("-"),
+            agent.title
         );
     }
     0
@@ -1083,6 +1417,7 @@ fn main() {
         "listen" => cmd_listen(&session, hub_opt.clone(), cmd_args),
         "status" => cmd_status(&session, hub_opt.clone(), cmd_args),
         "targets" => cmd_targets(&session, cmd_args),
+        "agents" => cmd_agents(&session, cmd_args),
         other => fail(2, &format!("unknown command '{other}' (use --help)")),
     };
     std::process::exit(code);
@@ -1109,6 +1444,18 @@ mod tests {
     #[test]
     fn invalid_regex_errors() {
         assert!(Pattern::new("/[unclosed/").is_err());
+    }
+
+    #[test]
+    fn trailing_newline_becomes_submit_key() {
+        assert_eq!(split_submit_text("testing"), ("testing", false));
+        assert_eq!(split_submit_text("testing\n"), ("testing", true));
+        assert_eq!(split_submit_text("testing\r\n"), ("testing", true));
+        assert_eq!(
+            split_submit_text("line one\nline two\n"),
+            ("line one\nline two", true)
+        );
+        assert_eq!(split_submit_text("\n"), ("", true));
     }
 
     #[test]
@@ -1179,7 +1526,25 @@ quadratic-mountain [Created 2days 5h 52m 40s ago] (EXITED - attach to resurrect)
     }
 
     #[test]
-    fn agent_kind_uses_command_and_title() {
+    fn built_in_profiles_cover_common_agents_and_variants() {
+        let profiles = builtin_agent_profiles();
+        for name in [
+            "claude",
+            "codex",
+            "antigravity",
+            "opencode",
+            "crush",
+            "pi",
+            "omp",
+            "hermes",
+            "vibe",
+            "z-code",
+        ] {
+            assert!(
+                profiles.iter().any(|profile| profile.name == name),
+                "missing built-in profile {name}"
+            );
+        }
         let opencode = PaneEntry {
             id: 1,
             is_plugin: false,
@@ -1188,9 +1553,48 @@ quadratic-mountain [Created 2days 5h 52m 40s ago] (EXITED - attach to resurrect)
             tab_name: "work".to_owned(),
             title: "OC | task".to_owned(),
             pane_command: Some("opencode2".to_owned()),
+            pane_cwd: None,
         };
-        assert_eq!(agent_kind(&opencode), Some("opencode"));
-        assert!(agent_role_matches("oc", "opencode"));
+        let profile = profile_for_pane(&opencode, &profiles).unwrap();
+        assert_eq!(profile.name, "opencode");
+        assert!(profile_matches_role(profile, "oc"));
+        assert!(title_matches_marker("pi | task", "pi"));
+        assert!(!title_matches_marker("pipeline", "pi"));
+    }
+
+    #[test]
+    fn custom_agent_config_extends_built_ins() {
+        let config: AgentConfigFile = toml::from_str(
+            r#"
+                [agents.opencode]
+                commands = ["opencode-beta"]
+                aliases = ["open"]
+
+                [agents.my-agent]
+                commands = ["my-agent"]
+                titles = ["My Agent"]
+            "#,
+        )
+        .unwrap();
+        let mut profiles = builtin_agent_profiles();
+        merge_agent_config(&mut profiles, config);
+
+        let opencode = profiles
+            .iter()
+            .find(|profile| profile.name == "opencode")
+            .unwrap();
+        assert!(opencode
+            .commands
+            .iter()
+            .any(|command| command == "opencode-beta"));
+        assert!(profile_matches_role(opencode, "open"));
+        assert!(profiles.iter().any(|profile| profile.name == "my-agent"));
+    }
+
+    #[test]
+    fn other_agent_spec_excludes_self() {
+        assert_eq!(split_agent_spec("other:codex"), (true, "codex"));
+        assert_eq!(split_agent_spec("agent:opencode"), (false, "opencode"));
     }
 
     #[test]

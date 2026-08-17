@@ -1,5 +1,5 @@
 ---
-name: zellij-pane-comms
+name: zellij-wrangler
 description: >
   Use when the user asks whether you can see another zellij pane, terminal, agent, or LLM
   session in the same zellij session; asks you to talk to, prompt, read, watch, or wait on
@@ -10,7 +10,7 @@ description: >
   "pane comms", "hub plugin".
 ---
 
-# zellij-pane-comms — talk to and read other panes in this zellij session
+# zellij-wrangler — talk to and read other panes in this zellij session
 
 Every pane in this zellij session can read and write any other pane, cross-tab. You have a
 shell in your own pane; other agents (codex, opencode, claude, …) run in other panes of the
@@ -51,15 +51,17 @@ progress) and to read its final answer.
 
 ```sh
 pz send terminal_2 'hello from pane terminal_1'     # types text; does NOT press Enter
-pz send terminal_2 $'hello\n'                       # trailing \n submits (shell ANSI-C quoting)
-pz send agent:opencode $'hello\n'                  # resolve OpenCode by role; submit
-pz ask agent:opencode $'what are you working on?\n' # type + block for fresh output (needs hub)
+pz send terminal_2 $'hello\n'                       # trailing \n submits with Enter
+pz send opencode $'hello\n'                        # resolve OpenCode by role; submit
+pz ask codex $'what are you working on?\n'         # type + block for fresh output (needs hub)
 ```
 
 - `pz send` writes characters into the target pane's stdin. An LLM TUI receives them in its
   input box exactly as if the user typed them — **include a trailing `\n` to submit the
-  prompt**. In plain shell, `$'...\n'` (ANSI-C quoting) preserves the newline; a bare `$(printf ...)`
-  strips it.
+  prompt**. `pz` converts that final newline into Zellij's explicit Enter key action, which is
+  important for full-screen TUIs that do not dispatch a raw LF as Enter. In plain shell,
+  `$'...\n'` (ANSI-C quoting) preserves the newline; a bare `$(printf ...)` strips trailing
+  newlines.
 - `pz ask <target> <prompt...> [--timeout N]` writes the prompt, snapshots the pane, then
   blocks until the pane prints NEW output (default 60s; exit 3 on timeout). The reply includes
   the target's echo of the prompt itself. Requires the hub.
@@ -100,12 +102,18 @@ state, NOT agent working/blocked status — the status-token model is not built 
 ## 7. Targets
 
 `terminal_2` | `plugin_1` | bare `3` (== `terminal_3`) | `tab:3` (active pane of tab 3) |
-`tab-name:work` (first tab named work) | `agent:opencode`, `agent:codex`, `agent:claude` |
+`tab-name:work` (first tab named work) | `agent:NAME` / bare `NAME` | `other:NAME` |
 `active` (the single focused pane).
 
-Agent targets are role aliases resolved to concrete pane ids before sending. They require a
-unique match; when multiple panes run the same agent, pz reports every candidate and requires
-an explicit pane id so a prompt cannot be delivered to the wrong LLM.
+Built-in names are `claude`, `codex`, `antigravity`, `opencode` (including `opencode2+`),
+`crush`, `pi`, `omp`, `hermes`, `vibe`, and `z-code`/`zcode`. Custom profiles can be added in
+`$XDG_CONFIG_HOME/pane-comms/agents.toml` (or `~/.config/pane-comms/agents.toml`); use
+`PZ_AGENTS_CONFIG` for another path. `pz agents --json` lists the current matches.
+
+Agent targets are resolved to concrete pane ids before sending. They require a unique match;
+when multiple panes run the same agent, pz reports every candidate's pane, tab, cwd, and
+command. Ask the user which candidate to use, then retry with that concrete pane id. Never guess.
+`other:NAME` excludes the caller's own pane from the search.
 
 ## Behavior rules (follow these)
 

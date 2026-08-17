@@ -89,17 +89,17 @@ All previously-open failures are fixed. The E2E now passes end-to-end on stock z
 - **`hub.wasm`** → `~/.local/share/zellij-wrangler/hub.wasm`.
 - **Permissions** pre-seeded in `~/.cache/zellij/permissions.kdl` for the installed path
   (same 4 permissions as the E2E heredoc) — hub loads without the UI prompt.
-- **Agent skill**: `pane-comms/skills/zellij-pane-comms/SKILL.md` (canonical, in-repo so it
+- **Agent skill**: `pane-comms/skills/zellij-wrangler/SKILL.md` (canonical, in-repo so it
   can be reviewed/pushed). Installed via symlinks:
-  `~/.agents/skills/zellij-pane-comms` → repo copy,
-  `~/.codex/skills/zellij-pane-comms` and `~/.config/opencode/skills/zellij-pane-comms` →
+  `~/.agents/skills/zellij-wrangler` → repo copy,
+  `~/.codex/skills/zellij-wrangler` and `~/.config/opencode/skills/zellij-wrangler` →
   that. `git push` updates every installed agent.
 - **Verified live** in the user's session: `pz targets`/`status` (hub auto-launch), 
   `dump-screen --full` reads both agent panes, `pz send --channel` → `pz listen` round-trip
   (delivered to 1 listener, exit 0).
 - **Deterministic agent glue** (skill activation alone is retrieval-based, not guaranteed):
   `~/.codex/AGENTS.md` gained a "Pane comms (zellij)" section (always loaded at startup);
-  `~/.config/opencode/opencode.json` gained `"instructions": [...zellij-pane-comms/SKILL.md]`
+  `~/.config/opencode/opencode.json` gained `"instructions": [...zellij-wrangler/SKILL.md]`
   (always loaded at startup).
 
 Note: the running codex/opencode TUIs load skills at startup — restart the agent pane to pick
