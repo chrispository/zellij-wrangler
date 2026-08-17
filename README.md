@@ -39,22 +39,62 @@ running.
 Add custom profiles in `$XDG_CONFIG_HOME/pane-comms/agents.toml` or
 `~/.config/pane-comms/agents.toml`. Use `PZ_AGENTS_CONFIG` to point to another file:
 
+- `commands` is the executable name Zellij reports for the pane. It is usually the first word
+  in the `command` field from `pz agents --json`, such as `opencode2` or
+  `my-codex-wrapper`—not a shell alias.
+- `aliases` are additional names you can use when asking an agent. The profile name itself also
+  works, so this example can be addressed as `my-codex` or `backend-codex`.
+- `titles` contains visible terminal-title text that identifies the agent when its command is
+  hidden behind a shell or wrapper. It is optional; command matching is usually best.
+
 ```toml
 [agents.my-codex]
+# The executable shown in the `command` field from `pz agents --json`.
 commands = ["my-codex-wrapper"]
+# Names users can say instead of the profile name `my-codex`.
 aliases = ["backend-codex"]
+# Optional visible terminal title used to recognize the pane.
 titles = ["Backend Codex"]
 
 [agents.opencode]
-commands = ["opencode-beta"]
+commands = ["opencode2"]
 aliases = ["oc"]
 ```
 
 Entries named after a built-in profile extend it; other entries create new profiles. Use
-`pz agents --json` to inspect the profiles currently discovered in the session. The companion
+`pz agents --json` to see the command and title Zellij is reporting for each discovered pane. The companion
 CLI, hub, and agent skill are in [`pane-comms/`](./pane-comms/), including build instructions,
 permissions, layouts, and the end-to-end test suite. The skill is
 [`pane-comms/skills/zellij-wrangler/SKILL.md`](./pane-comms/skills/zellij-wrangler/SKILL.md).
+
+For pane reading, `pz read` defaults to the newest 200 lines so routine requests do not pull a
+whole scrollback into an agent's context. The default is defined by `DEFAULT_READ_LINES` in
+`pane-comms/pz/src/main.rs`; use `pz read <target> --lines N` for a one-off size and
+`--offset 200` or `--offset 400` to page backward when recent context is unclear. Full history
+should be reserved for an explicit request.
+
+### Build and install
+
+From a checkout of this repository, build the hub and companion CLI once:
+
+```sh
+cd pane-comms
+rustup target add wasm32-wasip1
+export CARGO_TARGET_DIR="$PWD/target"
+cargo build -p hub --target wasm32-wasip1 --release
+cargo build -p pz
+
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/zellij-wrangler"
+install -m 755 target/debug/pz "$HOME/.local/bin/pz"
+install -m 644 target/wasm32-wasip1/release/hub.wasm \
+  "$HOME/.local/share/zellij-wrangler/hub.wasm"
+```
+
+Put `~/.local/bin` on your `PATH` if it is not already there (for example, add
+`export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc` or `~/.zshrc`). No shell alias is needed:
+the agent skill invokes `pz` for you. Install the skill links as described in the full
+[`pane-comms` README](./pane-comms/README.md), then restart already-running agents so they load
+it.
 
 ## Original README below
 

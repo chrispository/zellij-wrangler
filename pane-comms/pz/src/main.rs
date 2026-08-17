@@ -35,6 +35,8 @@ COMMANDS:
     send --channel <name> <text...>     Broadcast text to all listeners of a named channel
     ask <target> <prompt...> [--timeout N]
                                         Prompt a pane and block until it produces new output
+    read <target> [--lines N] [--offset N] [--ansi]
+                                        Read a bounded pane snapshot (newest 200 lines by default)
     wait <target> --until <pattern> [--timeout N]
                                         Block until the pane's output matches pattern
                                         (pattern starting with / is a regex, e.g. /^ready/)
@@ -56,6 +58,8 @@ EXIT CODES: 0 ok, 1 session/timeout, 2 bad target, 3 ask timeout, 4 status unkno
 SESSION: $ZELLIJ_SESSION_NAME, else the single active `zellij ls` session, else --session.
 HUB: $PZ_HUB_URL, else <pz>/../hub/target/wasm32-wasip1/release/hub.wasm.
 ";
+
+const DEFAULT_READ_LINES: usize = 200;
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 struct PaneEntry {
@@ -401,6 +405,14 @@ fn split_submit_text(text: &str) -> (&str, bool) {
     } else {
         (text, false)
     }
+}
+
+/// Select a window measured backwards from the newest pane output. `offset = 0` returns the
+/// newest `limit` lines; `offset = limit` returns the immediately preceding page.
+fn read_window(lines: &[String], limit: usize, offset: usize) -> &[String] {
+    let end = lines.len().saturating_sub(offset);
+    let start = end.saturating_sub(limit);
+    &lines[start..end]
 }
 
 /// Parse `zellij ls` output into `(name, is_current)` pairs, skipping EXITED sessions.
@@ -972,6 +984,76 @@ fn cmd_send(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
     0
 }
 
+fn cmd_read(session: &str, args: &[String]) -> i32 {
+    let mut line_limit = DEFAULT_READ_LINES;
+    let mut offset = 0usize;
+    let mut ansi = false;
+    let mut positional: Vec<&String> = vec![];
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--lines" => {
+                i += 1;
+                if i >= args.len() {
+                    fail(2, "--lines requires a positive number");
+                }
+                line_limit = args[i]
+                    .parse()
+                    .ok()
+                    .filter(|value: &usize| *value > 0)
+                    .unwrap_or_else(|| fail(2, "--lines requires a positive number"));
+            },
+            "--offset" => {
+                i += 1;
+                if i >= args.len() {
+                    fail(2, "--offset requires a non-negative number");
+                }
+                offset = args[i]
+                    .parse()
+                    .unwrap_or_else(|_| fail(2, "--offset requires a non-negative number"));
+            },
+            "--ansi" => ansi = true,
+            a if a.starts_with("--") => fail(2, &format!("unknown flag '{a}' for read")),
+            _ => positional.push(&args[i]),
+        }
+        i += 1;
+    }
+    if positional.len() != 1 {
+        fail(
+            2,
+            "usage: pz read <target> [--lines N] [--offset N] [--ansi]",
+        );
+    }
+    let pane = match resolve_target(session, positional[0]) {
+        Ok(p) => p,
+        Err(e) => fail(2, &e),
+    };
+    let mut zellij_args = vec![
+        "action",
+        "dump-screen",
+        "--pane-id",
+        pane.as_str(),
+        "--full",
+    ];
+    if ansi {
+        zellij_args.push("--ansi");
+    }
+    let out = match run_zellij(session, &zellij_args) {
+        Ok(out) if out.status.success() => out,
+        Ok(out) => {
+            eprintln!("pz: {}", String::from_utf8_lossy(&out.stderr).trim());
+            return 2;
+        },
+        Err(e) => fail(2, &e),
+    };
+    let contents = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<String> = contents.lines().map(str::to_owned).collect();
+    for line in read_window(&lines, line_limit, offset) {
+        println!("{line}");
+    }
+    0
+}
+
 fn cmd_ask(session: &str, hub_opt: Option<String>, args: &[String]) -> i32 {
     let mut timeout_ms: u64 = 60_000;
     let mut positional: Vec<&String> = vec![];
@@ -1413,6 +1495,7 @@ fn main() {
     let code = match cmd.as_str() {
         "send" => cmd_send(&session, hub_opt.clone(), cmd_args),
         "ask" => cmd_ask(&session, hub_opt.clone(), cmd_args),
+        "read" => cmd_read(&session, cmd_args),
         "wait" => cmd_wait(&session, cmd_args),
         "listen" => cmd_listen(&session, hub_opt.clone(), cmd_args),
         "status" => cmd_status(&session, hub_opt.clone(), cmd_args),
@@ -1456,6 +1539,15 @@ mod tests {
             ("line one\nline two", true)
         );
         assert_eq!(split_submit_text("\n"), ("", true));
+    }
+
+    #[test]
+    fn read_window_pages_back_from_newest() {
+        let lines: Vec<String> = (1..=5).map(|n| format!("line {n}")).collect();
+        assert_eq!(read_window(&lines, 2, 0), &lines[3..]);
+        assert_eq!(read_window(&lines, 2, 2), &lines[1..3]);
+        assert_eq!(read_window(&lines, 2, 4), &lines[..1]);
+        assert!(read_window(&lines, 2, 10).is_empty());
     }
 
     #[test]
@@ -1567,7 +1659,7 @@ quadratic-mountain [Created 2days 5h 52m 40s ago] (EXITED - attach to resurrect)
         let config: AgentConfigFile = toml::from_str(
             r#"
                 [agents.opencode]
-                commands = ["opencode-beta"]
+                commands = ["opencode2"]
                 aliases = ["open"]
 
                 [agents.my-agent]
@@ -1586,7 +1678,7 @@ quadratic-mountain [Created 2days 5h 52m 40s ago] (EXITED - attach to resurrect)
         assert!(opencode
             .commands
             .iter()
-            .any(|command| command == "opencode-beta"));
+            .any(|command| command == "opencode2"));
         assert!(profile_matches_role(opencode, "open"));
         assert!(profiles.iter().any(|profile| profile.name == "my-agent"));
     }

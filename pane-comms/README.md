@@ -45,19 +45,36 @@ pz agents --json
 Common profiles are built in, but custom wrappers can be added in
 `$XDG_CONFIG_HOME/pane-comms/agents.toml` (or `~/.config/pane-comms/agents.toml`):
 
+- `commands` is the executable name Zellij reports for the pane, usually the first word in the
+  `command` field from `pz agents --json` (for example, `opencode2`). It is not a shell alias.
+- `aliases` are extra names users can say when asking an agent. The profile name itself also
+  works.
+- `titles` is optional visible terminal-title text used to recognize an agent when its command is
+  hidden behind a shell or wrapper.
+
 ```toml
 [agents.my-codex]
+# Executable shown in the `command` field from `pz agents --json`.
 commands = ["my-codex-wrapper"]
+# Additional name users can say; `my-codex` also works.
 aliases = ["backend-codex"]
+# Optional terminal-title marker.
 titles = ["Backend Codex"]
 
 [agents.opencode]
-commands = ["opencode-beta"]
+commands = ["opencode2"]
 aliases = ["oc"]
 ```
 
 Set `PZ_AGENTS_CONFIG` to use a different config file. Config entries with a built-in name
-extend that profile; new names add custom profiles.
+extend that profile; new names add custom profiles. Use `pz agents --json` to see the command and
+title Zellij is reporting for each discovered pane.
+
+`pz read` returns the newest 200 lines of a pane by default. This is a context window for the
+agent, not a limit on Zellij's stored scrollback; the default is defined by `DEFAULT_READ_LINES`
+in `pz/src/main.rs`, and `--lines N` overrides it for one request. When recent output is unclear,
+use `--offset 200` for the previous page or `--offset 400` for the page before that before
+considering the entire history.
 
 Let panes (and tabs) exchange data directly: any pane can send input to any other pane, read
 any other pane, and join named channels — **without forking zellij**. Three artifacts in this
@@ -92,15 +109,19 @@ Pipes require zellij ≥ 0.40.
 
 ```sh
 export CARGO_TARGET_DIR="$PWD/target"
+rustup target add wasm32-wasip1
 cargo build -p hub --target wasm32-wasip1 --release
 cargo build -p pz
-cp target/wasm32-wasip1/release/hub.wasm ~/.local/share/zellij-wrangler/hub.wasm
-cp target/debug/pz ~/.local/bin/pz
+mkdir -p ~/.local/bin ~/.local/share/zellij-wrangler
+install -m 755 target/debug/pz ~/.local/bin/pz
+install -m 644 target/wasm32-wasip1/release/hub.wasm ~/.local/share/zellij-wrangler/hub.wasm
 ```
 
 `pz` auto-discovers the installed hub at `~/.local/share/zellij-wrangler/hub.wasm`
 (`$PZ_HUB_URL` overrides). Then seed the permissions cache once (see below), and install the
-agent skill:
+agent skill. If `~/.local/bin` is not already on your `PATH`, add
+`export PATH="$HOME/.local/bin:$PATH"` to your shell startup file; no alias is required:
+agents invoke `pz` through the skill.
 
 ```sh
 ln -s ~/Documents/zellij-wrangler/pane-comms/skills/zellij-wrangler ~/.agents/skills/zellij-wrangler
@@ -157,6 +178,7 @@ command runs (`zellij pipe --plugin ...` auto-launches the plugin), so pre-loadi
 pz send <target> <text...>             # write into a pane's stdin (cross-tab)
 pz send --channel <name> <text...>     # broadcast to all listeners of a channel
 pz ask <target> <prompt...> [--timeout N]   # prompt, block until the pane prints new output
+pz read <target> [--lines N] [--offset N]    # bounded pane snapshot; newest 200 by default
 pz wait <target> --until <pat> [--timeout N]  # block until output matches (substring or /regex/)
 pz listen <channel> [--format raw|json]  # stream a channel (Ctrl-C stops)
 pz status <target>                     # one-shot pane status (title/focused/exited)

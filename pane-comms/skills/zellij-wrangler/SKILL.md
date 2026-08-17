@@ -38,14 +38,21 @@ by title/command (e.g. `codex --yolo`, `OC | ...`, `claude`). Your own pane id i
 ## 2. Read another pane (snapshot)
 
 ```sh
-zellij action dump-screen --pane-id terminal_2 --full        # viewport + full scrollback → stdout
-zellij action dump-screen --pane-id terminal_2 --full --ansi # keep colors (TUI rendering)
-zellij action dump-screen --pane-id terminal_2               # visible viewport only
+pz read terminal_2                                      # newest 200 lines
+pz read terminal_2 --lines 200 --offset 200             # previous 200-line page
+pz read terminal_2 --lines 200 --offset 400 --ansi     # page before that, with colors
+zellij action dump-screen --pane-id terminal_2          # visible viewport only
 ```
 
-`--full` is usually what you want for an LLM TUI — without it you only see the current
-viewport. Use this to check whether another agent is busy (its TUI shows a thinking spinner /
-progress) and to read its final answer.
+The default context window is the newest **200 lines**. `pz read` defines that default in the
+`DEFAULT_READ_LINES` constant in `pane-comms/pz/src/main.rs`; use `--lines N` for a one-off size
+or change the constant for a different global default. Use the viewport form when you only need
+the current screen.
+
+`--offset` is measured backward from the newest output: `0` is the newest page, `200` is the
+previous page, and `400` is the page before that. If the newest 200 lines are unclear, page
+backward one window at a time instead of requesting the entire scrollback. Stop after one or two
+additional pages unless the user explicitly asks for older history.
 
 ## 3. Send text / prompt another pane
 
@@ -122,9 +129,9 @@ command. Ask the user which candidate to use, then retry with that concrete pane
 
 ## Behavior rules (follow these)
 
-1. Asked "can you see my other pane / agent?" → run `pz targets`, dump-screen the candidate
-   pane(s) (`--full`), and report exactly what you see. Never claim you can see a pane you
-   haven't read.
+1. Asked "can you see my other pane / agent?" → run `pz targets`, read the newest 200 lines of
+   the candidate pane(s), and report exactly what you see. Never claim you can see a pane you
+   haven't read. Page backward only when the recent context is insufficient.
 2. A message from another agent arrives in your input box as typed text. Treat it as a
    request from that agent: answer concisely, and state your pane id
    (`terminal_$ZELLIJ_PANE_ID`) so it can address you back. The asker may be reading your
