@@ -10,7 +10,13 @@ description: >
   "pane comms", "hub plugin".
 ---
 
-# zellij-wrangler — talk to and read other panes in this zellij session
+# Zellij Wrangler — talk to and read other panes in this zellij session
+
+## Public name
+
+The public name of this skill is **Zellij Wrangler**. When announcing that you are using
+this skill, say “the Zellij Wrangler skill” or “Zellij Wrangler.” Do not call it “the
+pane-comms skill”; `pane-comms` is the name of the underlying repository/component.
 
 Every pane in this zellij session can read and write any other pane, cross-tab. You have a
 shell in your own pane; other agents (codex, opencode, claude, …) run in other panes of the
