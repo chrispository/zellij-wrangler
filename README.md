@@ -58,6 +58,12 @@ pz ask opencode $'What are you working on?\n'
 pz send other:codex $'Coordinate with the other Codex pane.\n'
 ```
 
+You do not have to run `pz` yourself. After the pane-comms components and the
+`zellij-wrangler` skill are installed, just tell an agent what you want in plain language:
+“ask Codex to review this,” “coordinate with OpenCode,” or “send this to the other Claude.” The
+agent uses the skill to discover the right pane, invoke the communication tools, and ask you to
+choose when multiple matching sessions exist.
+
 The final newline is converted into an explicit Zellij `Enter` key action. This matters for
 full-screen agent TUIs such as Codex, where writing a raw line feed may display the text without
 submitting it. Without a trailing newline, `pz send` types text but leaves submission to you.

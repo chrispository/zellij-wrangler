@@ -56,6 +56,11 @@ pz send opencode $'hello\n'                        # resolve OpenCode by role; s
 pz ask codex $'what are you working on?\n'         # type + block for fresh output (needs hub)
 ```
 
+Users do not need to run `pz` directly. Once this skill and the pane-comms components are
+installed, interpret requests such as “ask Codex to review this,” “coordinate with OpenCode,”
+or “send this to the other Claude” as instructions to use `pz` on the user's behalf. Discover
+the target first; if multiple panes match, ask the user which candidate they mean.
+
 - `pz send` writes characters into the target pane's stdin. An LLM TUI receives them in its
   input box exactly as if the user typed them — **include a trailing `\n` to submit the
   prompt**. `pz` converts that final newline into Zellij's explicit Enter key action, which is
