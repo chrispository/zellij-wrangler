@@ -1,6 +1,6 @@
-//! zjw — pane-comms companion CLI.
+//! zjw — Zellij Wrangler companion CLI.
 //!
-//! `zjw` is a thin, stateless wrapper around stock zellij commands plus the pane-comms hub
+//! `zjw` is a thin, stateless wrapper around stock zellij commands plus the Zellij Wrangler hub
 //! plugin. Every invocation resolves the target, calls `zellij action` / `zellij pipe` /
 //! `zellij subscribe`, and exits. Nothing runs in the background; the hub (inside the zellij
 //! server) holds all state.
@@ -245,7 +245,7 @@ fn agent_config_path() -> Option<PathBuf> {
     let config_home = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(config_home.join("pane-comms").join("agents.toml"))
+    Some(config_home.join("zjw").join("agents.toml"))
 }
 
 fn load_agent_profiles() -> Result<Vec<AgentProfile>, String> {

@@ -3,7 +3,7 @@ name = "zjw"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "pane-comms companion CLI: cross-pane/cross-tab send, ask, wait, listen on stock zellij"
+description = "Zellij Wrangler companion CLI: cross-pane/cross-tab send, ask, wait, listen on stock zellij"
 
 [dependencies]
 regex = "1"

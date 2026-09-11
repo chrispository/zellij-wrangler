@@ -1,0 +1,2 @@
+// Minimal config for Zellij Wrangler E2E sessions. No plugins, default keybinds.
+theme "default"

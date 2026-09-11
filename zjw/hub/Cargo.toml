@@ -3,7 +3,7 @@ name = "hub"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "pane-comms hub plugin: named channels, cross-pane read/write, wait-for-output for zellij"
+description = "Zellij Wrangler hub plugin: named channels, cross-pane read/write, wait-for-output for zellij"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

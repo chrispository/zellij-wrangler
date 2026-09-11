@@ -1,6 +1,6 @@
 ## Zellij Wrangler: agent-aware pane prompting
 
-This fork adds `pane-comms`, a small companion CLI and Zellij hub plugin for communication
+This fork adds `zjw`, a small companion CLI and Zellij hub plugin for communication
 between terminal panes and the LLM agents running in them. It works across panes and tabs on
 stock Zellij, without depending on fixed pane numbers or tab names.
 
@@ -15,7 +15,7 @@ zjw ask opencode $'What are you working on?\n'
 zjw send other:codex $'Coordinate with the other Codex pane.\n'
 ```
 
-You do not have to run `zjw` yourself. After the pane-comms components and the
+You do not have to run `zjw` yourself. After the Zellij Wrangler components and the
 `zellij-wrangler` skill are installed, just tell an agent what you want in plain language:
 “ask Codex to review this,” “coordinate with OpenCode,” or “send this to the other Claude.” The
 agent uses the skill to discover the right pane, invoke the communication tools, and ask you to
@@ -36,8 +36,8 @@ running.
 
 ### Defining additional agents
 
-Add custom profiles in `$XDG_CONFIG_HOME/pane-comms/agents.toml` or
-`~/.config/pane-comms/agents.toml`. Use `ZJW_AGENTS_CONFIG` to point to another file:
+Add custom profiles in `$XDG_CONFIG_HOME/zjw/agents.toml` or
+`~/.config/zjw/agents.toml`. Use `ZJW_AGENTS_CONFIG` to point to another file:
 
 - `commands` is the executable name Zellij reports for the pane. It is usually the first word
   in the `command` field from `zjw agents --json`, such as `opencode2` or
@@ -63,13 +63,13 @@ aliases = ["oc"]
 
 Entries named after a built-in profile extend it; other entries create new profiles. Use
 `zjw agents --json` to see the command and title Zellij is reporting for each discovered pane. The companion
-CLI, hub, and agent skill are in [`pane-comms/`](./pane-comms/), including build instructions,
+CLI, hub, and agent skill are in [`zjw/`](./zjw/), including build instructions,
 permissions, layouts, and the end-to-end test suite. The skill is
-[`pane-comms/skills/zellij-wrangler/SKILL.md`](./pane-comms/skills/zellij-wrangler/SKILL.md).
+[`zjw/skills/zellij-wrangler/SKILL.md`](./zjw/skills/zellij-wrangler/SKILL.md).
 
 For pane reading, `zjw read` defaults to the newest 200 lines so routine requests do not pull a
 whole scrollback into an agent's context. The default is defined by `DEFAULT_READ_LINES` in
-`pane-comms/zjw/src/main.rs`; use `zjw read <target> --lines N` for a one-off size and
+`zjw/src/main.rs`; use `zjw read <target> --lines N` for a one-off size and
 `--offset 200` or `--offset 400` to page backward when recent context is unclear. Full history
 should be reserved for an explicit request.
 
@@ -78,7 +78,7 @@ should be reserved for an explicit request.
 From a checkout of this repository, build the hub and companion CLI once:
 
 ```sh
-cd pane-comms
+cd zjw
 rustup target add wasm32-wasip1
 export CARGO_TARGET_DIR="$PWD/target"
 cargo build -p hub --target wasm32-wasip1 --release
@@ -93,7 +93,7 @@ install -m 644 target/wasm32-wasip1/release/hub.wasm \
 Put `~/.local/bin` on your `PATH` if it is not already there (for example, add
 `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc` or `~/.zshrc`). No shell alias is needed:
 the agent skill invokes `zjw` for you. Install the skill links as described in the full
-[`pane-comms` README](./pane-comms/README.md), then restart already-running agents so they load
+[`zjw` README](./zjw/README.md), then restart already-running agents so they load
 it.
 
 ## Original README below

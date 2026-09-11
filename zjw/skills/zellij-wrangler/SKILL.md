@@ -7,7 +7,7 @@ description: >
   about pane-to-pane / cross-tab communication. Triggers: "can you see my other pane",
   "tell the other agent", "what is the other pane doing", "broadcast to all panes",
   "wait for the other agent", `zjw`, `zellij action dump-screen`, `zellij subscribe`,
-  "pane comms", "hub plugin".
+  "Zellij Wrangler", "hub plugin".
 ---
 
 # Zellij Wrangler — talk to and read other panes in this zellij session
@@ -15,8 +15,7 @@ description: >
 ## Public name
 
 The public name of this skill is **Zellij Wrangler**. When announcing that you are using
-this skill, say “the Zellij Wrangler skill” or “Zellij Wrangler.” Do not call it “the
-pane-comms skill”; `pane-comms` is the name of the underlying repository/component.
+this skill, say “the Zellij Wrangler skill” or “Zellij Wrangler.”
 
 Every pane in this zellij session can read and write any other pane, cross-tab. You have a
 shell in your own pane; other agents (codex, opencode, claude, …) run in other panes of the
@@ -51,7 +50,7 @@ zellij action dump-screen --pane-id terminal_2          # visible viewport only
 ```
 
 The default context window is the newest **200 lines**. `zjw read` defines that default in the
-`DEFAULT_READ_LINES` constant in `pane-comms/zjw/src/main.rs`; use `--lines N` for a one-off size
+`DEFAULT_READ_LINES` constant in `zjw/src/main.rs`; use `--lines N` for a one-off size
 or change the constant for a different global default. Use the viewport form when you only need
 the current screen.
 
@@ -69,7 +68,7 @@ zjw send opencode $'hello\n'                        # resolve OpenCode by role; 
 zjw ask codex $'what are you working on?\n'         # type + block for fresh output (needs hub)
 ```
 
-Users do not need to run `zjw` directly. Once this skill and the pane-comms components are
+Users do not need to run `zjw` directly. Once this skill and the Zellij Wrangler components are
 installed, interpret requests such as “ask Codex to review this,” “coordinate with OpenCode,”
 or “send this to the other Claude” as instructions to use `zjw` on the user's behalf. Discover
 the target first; if multiple panes match, ask the user which candidate they mean.
@@ -125,8 +124,8 @@ state, NOT agent working/blocked status — the status-token model is not built 
 
 Built-in names are `claude`, `codex`, `antigravity`, `opencode` (including `opencode2+`),
 `crush`, `pi`, `omp`, `hermes`, `vibe`, and `z-code`/`zcode`. Custom profiles can be added in
-`$XDG_CONFIG_HOME/pane-comms/agents.toml` (or `~/.config/pane-comms/agents.toml`); use
-`zjw_AGENTS_CONFIG` for another path. `zjw agents --json` lists the current matches.
+`$XDG_CONFIG_HOME/zjw/agents.toml` (or `~/.config/zjw/agents.toml`); use
+`ZJW_AGENTS_CONFIG` for another path. `zjw agents --json` lists the current matches.
 
 Agent targets are resolved to concrete pane ids before sending. They require a unique match;
 when multiple panes run the same agent, zjw reports every candidate's pane, tab, cwd, and
@@ -157,4 +156,4 @@ command. Ask the user which candidate to use, then retry with that concrete pane
 | 3 | `ask` timed out |
 | 4 | `status` target unknown |
 
-Source repo: `~/Documents/zellij-wrangler/pane-comms` (hub + zjw + E2E tests).
+Source repo: `~/Documents/zellij-wrangler/zjw` (hub + zjw + E2E tests).

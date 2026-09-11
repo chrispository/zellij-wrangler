@@ -1,8 +1,8 @@
-# pane-comms — cross-pane & cross-tab communication for zellij
+# Zellij Wrangler — cross-pane & cross-tab communication for zellij
 
 ## Agent-aware prompting
 
-`pane-comms` can prompt another LLM as if you typed into its Zellij pane. Agent names are
+`zjw` can prompt another LLM as if you typed into its Zellij pane. Agent names are
 resolved from the live pane command and title on every invocation, so they do not depend on
 fixed pane numbers or tab names such as `Tab #1`.
 
@@ -21,7 +21,7 @@ zjw ask opencode $'What are you working on?\n'
 zjw send other:codex $'Coordinate with the other Codex pane.\n'
 ```
 
-You do not have to run `zjw` yourself. Once the pane-comms components and the
+You do not have to run `zjw` yourself. Once the Zellij Wrangler components and the
 `zellij-wrangler` skill are installed, just tell an agent what you want: “ask Codex to review
 this,” “coordinate with OpenCode,” or “send this to the other Claude.” The agent discovers the
 target and invokes `zjw` for you, asking which pane to use if there is more than one match.
@@ -43,7 +43,7 @@ zjw agents --json
 ```
 
 Common profiles are built in, but custom wrappers can be added in
-`$XDG_CONFIG_HOME/pane-comms/agents.toml` (or `~/.config/pane-comms/agents.toml`):
+`$XDG_CONFIG_HOME/zjw/agents.toml` (or `~/.config/zjw/agents.toml`):
 
 - `commands` is the executable name Zellij reports for the pane, usually the first word in the
   `command` field from `zjw agents --json` (for example, `opencode2`). It is not a shell alias.
@@ -87,8 +87,8 @@ directory, running on stock zellij:
    exits. No daemon.
 3. **`layouts/` + `tests/`** — a test session layout and the end-to-end suite.
 
-Model: herdr's socket API (`pane.send_text`, `pane.read`, `events.subscribe`). Design rules
-(from `../pane_comms.md`): communication is **on the ask only** — nothing is pushed unless
+Model: herdr's socket API (`pane.send_text`, `pane.read`, `events.subscribe`). Design rules:
+communication is **on the ask only** — nothing is pushed unless
 something explicitly asked for it; idle cost is zero; status is self-reported, never
 output-derived (M5, deferred).
 
@@ -124,7 +124,7 @@ agent skill. If `~/.local/bin` is not already on your `PATH`, add
 agents invoke `zjw` through the skill.
 
 ```sh
-ln -s ~/Documents/zellij-wrangler/pane-comms/skills/zellij-wrangler ~/.agents/skills/zellij-wrangler
+ln -s ~/Documents/zellij-wrangler/zjw/skills/zellij-wrangler ~/.agents/skills/zellij-wrangler
 ln -s ~/.agents/skills/zellij-wrangler ~/.codex/skills/zellij-wrangler
 ln -s ~/.agents/skills/zellij-wrangler ~/.config/opencode/skills/zellij-wrangler
 ```
@@ -137,7 +137,7 @@ installed agent.
 Skill activation alone is retrieval-based (the agent sees the skill's description and decides
 to read it) — usually enough, not guaranteed. The always-loaded glue makes it deterministic:
 
-- **codex**: `~/.codex/AGENTS.md` carries a "Pane comms (zellij)" section pointing at the
+- **codex**: `~/.codex/AGENTS.md` carries a "Zellij Wrangler" section pointing at the
   skill (AGENTS.md is loaded into every codex session at startup).
 - **opencode**: `~/.config/opencode/opencode.json` has
   `"instructions": ["/home/chris/.agents/skills/zellij-wrangler/SKILL.md"]`, which loads the
@@ -275,7 +275,7 @@ E2E coverage: M1 baseline (write-chars, dump-screen round-trip, cross-tab), targ
 - **Version pin**: tested against zellij 0.44.3. The plugin protocol is versioned upstream and
   old plugins keep loading, but pin zellij in CI before running the E2E suite.
 
-## Not yet built (deferred, per pane_comms.md)
+## Not yet built
 
 - M5 agent status + prompting (`zjw status` here is pane status, not agent status; agent
   status tokens with TTLs and `zstatus`-style wrappers are M5).

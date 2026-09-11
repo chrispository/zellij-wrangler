@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pane-comms end-to-end test.
+# Zellij Wrangler end-to-end test.
 #
 # Spawns a dedicated zellij session (never touches your other sessions), loads the hub,
 # and exercises the full zjw surface: send, ask, wait, listen, status, targets, cross-tab,
@@ -38,7 +38,7 @@ check() { # check <desc> <expected-exit> cmd...
     fi
 }
 
-echo "==> pane-comms E2E (session=$SESSION, repo=$REPO)"
+echo "==> Zellij Wrangler E2E (session=$SESSION, repo=$REPO)"
 
 # --- build -------------------------------------------------------------------------------
 echo "==> building hub + zjw"

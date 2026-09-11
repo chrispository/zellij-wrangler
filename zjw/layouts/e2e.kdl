@@ -1,4 +1,4 @@
-// E2E layout for pane-comms: two panes in tab 0, one pane in tab "work".
+// E2E layout for Zellij Wrangler: two panes in tab 0, one pane in tab "work".
 layout {
     tab {
         pane split_direction="vertical" {

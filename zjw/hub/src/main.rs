@@ -1,6 +1,6 @@
-//! pane-comms hub — a zellij plugin implementing cross-pane / cross-tab communication.
+//! Zellij Wrangler hub — a zellij plugin implementing cross-pane / cross-tab communication.
 //!
-//! The hub is the only always-on component of pane-comms. It loads inside a zellij session
+//! The hub is the only always-on component of Zellij Wrangler. It loads inside a zellij session
 //! (layout `run_plugin`, `zellij action start-or-reload-plugin`, or on demand the first time a
 //! `zellij pipe --plugin hub.wasm ...` command runs) and holds all channel state: named-channel
 //! subscribers and in-flight `ask` waits. It is deliberately stateless across sessions.
