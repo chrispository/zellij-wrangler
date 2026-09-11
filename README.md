@@ -101,12 +101,6 @@ CLI, hub, and agent skill are in [`zjw/`](./zjw/), including build instructions,
 permissions, layouts, and the end-to-end test suite. The skill is
 [`zjw/skills/zellij-wrangler/SKILL.md`](./zjw/skills/zellij-wrangler/SKILL.md).
 
-For pane reading, `zjw read` defaults to the newest 200 lines so routine requests do not pull a
-whole scrollback into an agent's context. The default is defined by `DEFAULT_READ_LINES` in
-`zjw/src/main.rs`; use `zjw read <target> --lines N` for a one-off size and
-`--offset 200` or `--offset 400` to page backward when recent context is unclear. Full history
-should be reserved for an explicit request.
-
 ## Original README below
 
 <h1 align="center">
