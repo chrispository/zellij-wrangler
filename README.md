@@ -92,9 +92,31 @@ install -m 644 target/wasm32-wasip1/release/hub.wasm \
 
 Put `~/.local/bin` on your `PATH` if it is not already there (for example, add
 `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc` or `~/.zshrc`). No shell alias is needed:
-the agent skill invokes `zjw` for you. Install the skill links as described in the full
-[`zjw` README](./zjw/README.md), then restart already-running agents so they load
-it.
+the agent skill invokes `zjw` for you.
+
+### Install the agent skill
+
+Agents (such as Claude, Codex, OpenCode, Antigravity, etc.) learn how to use `zjw` through the `zellij-wrangler` skill. Symlink it (recommended so `git pull` updates the skill automatically) or copy it into your agent's skills directory:
+
+```sh
+# Ensure your target skills directories exist
+mkdir -p ~/.agents/skills ~/.codex/skills ~/.config/opencode/skills
+
+# From within the zjw/ directory, symlink the skill:
+ln -s "$PWD/skills/zellij-wrangler" ~/.agents/skills/zellij-wrangler
+
+# (Or if you are at the repository root):
+# ln -s "$PWD/zjw/skills/zellij-wrangler" ~/.agents/skills/zellij-wrangler
+
+# If you prefer copying instead of symlinking:
+# cp -r skills/zellij-wrangler ~/.agents/skills/zellij-wrangler
+
+# Link across agents as needed:
+ln -s ~/.agents/skills/zellij-wrangler ~/.codex/skills/zellij-wrangler
+ln -s ~/.agents/skills/zellij-wrangler ~/.config/opencode/skills/zellij-wrangler
+```
+
+Restart any already-running agents so they load the new skill. For deterministic startup loading (such as configuring `~/.codex/AGENTS.md` or OpenCode instructions) and pre-seeding Zellij hub permissions, see the full [`zjw` README](./zjw/README.md).
 
 ## Original README below
 

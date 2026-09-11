@@ -26,7 +26,7 @@ Two pieces, already installed:
 - `zjw` — `~/.local/bin/zjw`, a stateless CLI. It resolves targets and wraps stock
   `zellij action` / `zellij pipe` / `zellij subscribe`. Session comes from
   `$ZELLIJ_SESSION_NAME` automatically.
-- hub plugin — `file:///home/chris/.local/share/zellij-wrangler/hub.wasm`, loaded per session
+- hub plugin — `~/.local/share/zellij-wrangler/hub.wasm`, loaded per session
   (permissions pre-granted in `~/.cache/zellij/permissions.kdl`). Only needed for
   `ask` / `listen` / `send --channel` / `status`; `zjw` launches it on demand.
 

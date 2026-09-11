@@ -124,7 +124,8 @@ agent skill. If `~/.local/bin` is not already on your `PATH`, add
 agents invoke `zjw` through the skill.
 
 ```sh
-ln -s ~/Documents/zellij-wrangler/zjw/skills/zellij-wrangler ~/.agents/skills/zellij-wrangler
+mkdir -p ~/.agents/skills ~/.codex/skills ~/.config/opencode/skills
+ln -s "$PWD/skills/zellij-wrangler" ~/.agents/skills/zellij-wrangler
 ln -s ~/.agents/skills/zellij-wrangler ~/.codex/skills/zellij-wrangler
 ln -s ~/.agents/skills/zellij-wrangler ~/.config/opencode/skills/zellij-wrangler
 ```
@@ -140,7 +141,7 @@ to read it) — usually enough, not guaranteed. The always-loaded glue makes it 
 - **codex**: `~/.codex/AGENTS.md` carries a "Zellij Wrangler" section pointing at the
   skill (AGENTS.md is loaded into every codex session at startup).
 - **opencode**: `~/.config/opencode/opencode.json` has
-  `"instructions": ["/home/chris/.agents/skills/zellij-wrangler/SKILL.md"]`, which loads the
+  `"instructions": ["~/.agents/skills/zellij-wrangler/SKILL.md"]`, which loads the
   skill unconditionally at startup (config `instructions` field).
 
 Agents already running must be restarted to pick up either change.
