@@ -1,4 +1,4 @@
-## Zellij Wrangler: agent-aware pane prompting
+## Zellij Wrangler: Agent-Aware Prompting
 
 This fork adds `zjw`, a small companion CLI and Zellij hub plugin for communication
 between terminal panes and the LLM agents running in them. It works across panes and tabs on
