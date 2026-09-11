@@ -23,8 +23,9 @@ use url::Url;
 use wasmi::{Engine, Module};
 use zellij_utils::consts::{ZELLIJ_CACHE_DIR, ZELLIJ_SESSION_CACHE_DIR, ZELLIJ_TMP_DIR};
 use zellij_utils::data::{
-    FloatingPaneCoordinates, InputMode, LayoutInfo, LayoutWithError, PaneContents,
-    PaneRenderReport, PermissionStatus, PermissionType, PipeMessage, PipeSource,
+    FloatingPaneCoordinates, HostTerminalThemeMode, InputMode, KeybindsVec, LayoutInfo,
+    LayoutWithError, PaneContents, PaneRenderReport, PermissionStatus, PermissionType, PipeMessage,
+    PipeSource,
 };
 use zellij_utils::downloader::Downloader;
 use zellij_utils::input::keybinds::Keybinds;
@@ -200,6 +201,7 @@ pub struct WasmBridge {
     base_modes: HashMap<ClientId, InputMode>,
     downloader: Downloader,
     previous_pane_render_report: Option<PaneRenderReport>,
+    last_host_terminal_theme_mode: Option<HostTerminalThemeMode>,
     pub last_session_save_time: Arc<Mutex<Option<u64>>>, // milliseconds since UNIX epoch
 }
 
@@ -262,6 +264,7 @@ impl WasmBridge {
             base_modes: HashMap::new(),
             downloader,
             previous_pane_render_report: None,
+            last_host_terminal_theme_mode: None,
             last_session_save_time: Arc::new(Mutex::new(None)),
         }
     }
@@ -690,6 +693,14 @@ impl WasmBridge {
             new_plugins.insert(plugin_id);
         }
         for plugin_id in new_plugins {
+            if self
+                .plugin_map
+                .lock()
+                .unwrap()
+                .contains(plugin_id, client_id)
+            {
+                continue;
+            }
             let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id).map(|r| r.clone())
             else {
                 log::error!("Failed to find plugin with id: {}", plugin_id);
@@ -873,6 +884,13 @@ impl WasmBridge {
         mut updates: Vec<(Option<PluginId>, Option<ClientId>, Event)>,
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
+        for (plugin_id, client_id, event) in updates.iter() {
+            if plugin_id.is_none() && client_id.is_none() {
+                if let Event::HostTerminalThemeChanged(mode) = event {
+                    self.last_host_terminal_theme_mode = Some(*mode);
+                }
+            }
+        }
         let plugins_to_update: Vec<(
             PluginId,
             ClientId,
@@ -1342,12 +1360,36 @@ impl WasmBridge {
                 .map(|(_, _, rp, _)| rp.lock().unwrap().store.data().keybinds.to_keybinds_vec())
         };
         if let Some(keybinds) = keybinds {
-            let _ = self.senders.send_to_plugin(PluginInstruction::Update(vec![(
-                Some(plugin_id),
-                Some(client_id),
-                Event::InitialKeybinds(keybinds),
-            )]));
+            self.send_keybinds_payload_to_plugin(plugin_id, client_id, keybinds);
         }
+    }
+
+    pub fn send_host_terminal_theme_mode_to_plugin(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+    ) {
+        let Some(mode) = self.last_host_terminal_theme_mode else {
+            return;
+        };
+        let _ = self.senders.send_to_plugin(PluginInstruction::Update(vec![(
+            Some(plugin_id),
+            Some(client_id),
+            Event::HostTerminalThemeChanged(mode),
+        )]));
+    }
+
+    fn send_keybinds_payload_to_plugin(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        keybinds: KeybindsVec,
+    ) {
+        let _ = self.senders.send_to_plugin(PluginInstruction::Update(vec![(
+            Some(plugin_id),
+            Some(client_id),
+            Event::InitialKeybinds(keybinds),
+        )]));
     }
 
     pub fn cleanup(&mut self) {
@@ -1441,8 +1483,15 @@ impl WasmBridge {
             });
         }
         // Send InitialKeybinds to subscribed plugins after reconfiguration
-        for plugin_id in plugins_subscribed_to_initial_keybinds {
-            self.send_initial_keybinds_to_plugin(plugin_id, client_id);
+        if let Some(keybinds) = keybinds.as_ref() {
+            let keybinds_payload = keybinds.to_keybinds_vec();
+            for plugin_id in plugins_subscribed_to_initial_keybinds {
+                self.send_keybinds_payload_to_plugin(
+                    plugin_id,
+                    client_id,
+                    keybinds_payload.clone(),
+                );
+            }
         }
         Ok(())
     }
@@ -1636,7 +1685,7 @@ impl WasmBridge {
         self.plugin_map.lock().unwrap().all_plugin_ids()
     }
     fn size_of_plugin_id(&self, plugin_id: PluginId) -> Option<(usize, usize)> {
-        // (rows/colums)
+        // (rows/columns)
         self.plugin_map
             .lock()
             .unwrap()
@@ -2084,7 +2133,9 @@ pub fn apply_event_to_plugin(
         (PermissionStatus::Granted, _) => {
             let mut event = event.clone();
             if let Event::ModeUpdate(mode_info) = &mut event {
-                mode_info.base_mode = Some(running_plugin.store.data().default_mode);
+                if mode_info.base_mode.is_none() {
+                    mode_info.base_mode = Some(running_plugin.store.data().default_mode);
+                }
                 if plugin_subscriptions.contains(&EventType::InitialKeybinds) {
                     // Plugin caches keybindings via InitialKeybinds — send lightweight ModeUpdate
                     mode_info.keybinds = vec![];
