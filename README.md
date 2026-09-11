@@ -4,17 +4,6 @@ This fork adds `zjw`, a small companion CLI and Zellij hub plugin for communicat
 between terminal panes and the LLM agents running in them. It works across panes and tabs on
 stock Zellij, without depending on fixed pane numbers or tab names.
 
-`zjw` discovers agents from each pane's live command and title, so prompts can use a friendly
-agent name:
-
-```sh
-zjw targets
-zjw agents
-zjw send codex $'Please review the failing test.\n'
-zjw ask opencode $'What are you working on?\n'
-zjw send other:codex $'Coordinate with the other Codex pane.\n'
-```
-
 You do not have to run `zjw` yourself. After the Zellij Wrangler components and the
 `zellij-wrangler` skill are installed, just tell an agent what you want in plain language:
 “ask Codex to review this,” “coordinate with OpenCode,” or “send this to the other Claude.” The
@@ -33,45 +22,6 @@ If more than one pane matches an agent, `zjw` refuses to guess and reports each 
 tab, working directory, and command. Ask which one to use, then send to its concrete pane id.
 `other:NAME` excludes the calling pane, which is useful when two agents of the same type are
 running.
-
-### Defining additional agents
-
-Add custom profiles in `$XDG_CONFIG_HOME/zjw/agents.toml` or
-`~/.config/zjw/agents.toml`. Use `ZJW_AGENTS_CONFIG` to point to another file:
-
-- `commands` is the executable name Zellij reports for the pane. It is usually the first word
-  in the `command` field from `zjw agents --json`, such as `opencode2` or
-  `codex`—not a shell alias.
-- `aliases` are additional names you can use when asking an agent. The profile name itself also
-  works, so this example can be addressed as `codex` or `backend-codex`.
-- `titles` contains visible terminal-title text that identifies the agent when its command is
-  hidden behind a shell or wrapper. It is optional; command matching is usually best.
-
-```toml
-[agents.codex]
-# The executable shown in the `command` field from `zjw agents --json`.
-commands = ["codex"]
-# Names users can say in addition to the profile name `codex`.
-aliases = ["backend-codex"]
-# Optional visible terminal title used to recognize the pane.
-titles = ["Backend Codex"]
-
-[agents.opencode]
-commands = ["opencode2"]
-aliases = ["oc"]
-```
-
-Entries named after a built-in profile extend it; other entries create new profiles. Use
-`zjw agents --json` to see the command and title Zellij is reporting for each discovered pane. The companion
-CLI, hub, and agent skill are in [`zjw/`](./zjw/), including build instructions,
-permissions, layouts, and the end-to-end test suite. The skill is
-[`zjw/skills/zellij-wrangler/SKILL.md`](./zjw/skills/zellij-wrangler/SKILL.md).
-
-For pane reading, `zjw read` defaults to the newest 200 lines so routine requests do not pull a
-whole scrollback into an agent's context. The default is defined by `DEFAULT_READ_LINES` in
-`zjw/src/main.rs`; use `zjw read <target> --lines N` for a one-off size and
-`--offset 200` or `--offset 400` to page backward when recent context is unclear. Full history
-should be reserved for an explicit request.
 
 ### Build and install
 
@@ -117,6 +67,45 @@ ln -s ~/.agents/skills/zellij-wrangler ~/.config/opencode/skills/zellij-wrangler
 ```
 
 Restart any already-running agents so they load the new skill. For deterministic startup loading (such as configuring `~/.codex/AGENTS.md` or OpenCode instructions) and pre-seeding Zellij hub permissions, see the full [`zjw` README](./zjw/README.md).
+
+### Defining additional agents
+
+Add custom profiles in `$XDG_CONFIG_HOME/zjw/agents.toml` or
+`~/.config/zjw/agents.toml`. Use `ZJW_AGENTS_CONFIG` to point to another file:
+
+- `commands` is the executable name Zellij reports for the pane. It is usually the first word
+  in the `command` field from `zjw agents --json`, such as `opencode2` or
+  `codex`—not a shell alias.
+- `aliases` are additional names you can use when asking an agent. The profile name itself also
+  works, so this example can be addressed as `codex` or `backend-codex`.
+- `titles` contains visible terminal-title text that identifies the agent when its command is
+  hidden behind a shell or wrapper. It is optional; command matching is usually best.
+
+```toml
+[agents.codex]
+# The executable shown in the `command` field from `zjw agents --json`.
+commands = ["codex"]
+# Names users can say in addition to the profile name `codex`.
+aliases = ["backend-codex"]
+# Optional visible terminal title used to recognize the pane.
+titles = ["Backend Codex"]
+
+[agents.opencode]
+commands = ["opencode2"]
+aliases = ["oc"]
+```
+
+Entries named after a built-in profile extend it; other entries create new profiles. Use
+`zjw agents --json` to see the command and title Zellij is reporting for each discovered pane. The companion
+CLI, hub, and agent skill are in [`zjw/`](./zjw/), including build instructions,
+permissions, layouts, and the end-to-end test suite. The skill is
+[`zjw/skills/zellij-wrangler/SKILL.md`](./zjw/skills/zellij-wrangler/SKILL.md).
+
+For pane reading, `zjw read` defaults to the newest 200 lines so routine requests do not pull a
+whole scrollback into an agent's context. The default is defined by `DEFAULT_READ_LINES` in
+`zjw/src/main.rs`; use `zjw read <target> --lines N` for a one-off size and
+`--offset 200` or `--offset 400` to page backward when recent context is unclear. Full history
+should be reserved for an explicit request.
 
 ## Original README below
 
