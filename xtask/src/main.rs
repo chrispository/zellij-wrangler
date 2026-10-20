@@ -86,6 +86,16 @@ fn workspace_members() -> &'static Vec<WorkspaceMember> {
                 extra_artifacts: &[],
             },
             WorkspaceMember {
+                crate_name: "default-plugins/prompt",
+                build: true,
+                extra_artifacts: &[],
+            },
+            WorkspaceMember {
+                crate_name: "default-plugins/context-menu",
+                build: true,
+                extra_artifacts: &[],
+            },
+            WorkspaceMember {
                 crate_name: "zellij-utils",
                 build: false,
                 extra_artifacts: &[],
@@ -107,6 +117,11 @@ fn workspace_members() -> &'static Vec<WorkspaceMember> {
             },
             WorkspaceMember {
                 crate_name: "zellij-server",
+                build: false,
+                extra_artifacts: &[],
+            },
+            WorkspaceMember {
+                crate_name: "zellij-window",
                 build: false,
                 extra_artifacts: &[],
             },

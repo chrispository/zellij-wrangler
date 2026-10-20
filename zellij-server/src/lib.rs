@@ -24,6 +24,9 @@ mod pty_writer;
 mod route;
 mod screen;
 mod session_layout_metadata;
+mod session_previews;
+pub mod session_suggestions;
+mod socket_folder_watcher;
 mod terminal_bytes;
 mod thread_bus;
 mod ui;
@@ -31,11 +34,14 @@ mod ui;
 use background_jobs::{background_jobs_main, BackgroundJob};
 use log::info;
 use pty_writer::{pty_writer_main, PtyWriteInstruction};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, RwLock,
+    },
     thread,
 };
 use zellij_utils::envs;
@@ -43,11 +49,13 @@ use zellij_utils::pane_size::Size;
 
 use zellij_utils::input::cli_assets::CliAssets;
 use zellij_utils::input::options::{PaneFrameStyle, DEFAULT_WORD_SEPARATORS};
+use zellij_utils::input::window::WindowSettings;
 
 use wasmi::Engine;
 
 use crate::{
-    os_input_output::ServerOsApi,
+    os_input_output::{env_value, PaneEnv, ServerOsApi},
+    output::RenderPayload,
     panes::PaneId,
     plugins::{plugin_thread_main, PluginInstruction},
     pty::{get_default_shell, pty_thread_main, Pty, PtyInstruction},
@@ -55,30 +63,43 @@ use crate::{
     thread_bus::{Bus, ThreadSenders},
 };
 use route::{route_thread_main, NotificationEnd};
+use session_suggestions::SessionSuggestionsJob;
 use zellij_utils::{
     channels::{self, ChannelWithContext, SenderWithContext},
     consts::{
         DEFAULT_SCROLL_BUFFER_SIZE, SCROLL_BUFFER_SIZE, ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE,
     },
     data::{
-        ConnectToSession, Direction, InputMode, KeyWithModifier, LayoutInfo, LayoutWithError,
-        Style, WebSharing,
+        ConfigSnapshot, ConnectToSession, Direction, HostTerminalThemeMode, InputMode,
+        KeyWithModifier, KeybindPresetSource, LayoutInfo, LayoutWithError, MouseTrigger,
+        SettingKey, Style, Styling, WebSharing,
     },
     errors::{prelude::*, ContextType, ErrorInstruction, FatalError, ServerContext},
     home::{default_layout_dir, get_default_data_dir},
     input::{
         actions::Action,
         command::{RunCommand, TerminalAction},
-        config::{watch_config_file_changes, watch_layout_dir_changes, Config},
+        config::{
+            load_config_file, watch_config_file_changes, watch_keybinds_dir_changes,
+            watch_layout_dir_changes, Config,
+        },
+        config_blocks,
+        config_file_edit::{read_config_file, save_config_in_place, SaveOutcome},
+        config_settings,
+        keybind_presets::{
+            copy_keybind_preset_to_folder, list_keybind_presets, save_keybinds_as_preset,
+            KeybindChanges,
+        },
         keybinds::Keybinds,
         layout::{FloatingPaneLayout, Layout, PluginAlias, Run, RunPluginOrAlias},
         options::Options,
         plugins::PluginAliases,
+        theme::{Theme, Themes},
     },
     ipc::{
         ClientAttributes, ClientToServerMsg, ExitReason, IpcReceiverWithContext, ServerToClientMsg,
     },
-    shared::{default_palette, web_server_base_url},
+    shared::web_server_base_url,
 };
 
 pub use zellij_utils::data::ClientId;
@@ -97,7 +118,7 @@ pub enum ServerInstruction {
         bool, // is_web_client
         ClientId,
     ),
-    Render(Option<HashMap<ClientId, String>>),
+    Render(Option<HashMap<ClientId, RenderPayload>>),
     UnblockInputThread,
     ClientExit(ClientId, Option<NotificationEnd>),
     RemoveClient(ClientId),
@@ -116,7 +137,10 @@ pub enum ServerInstruction {
     Log(Vec<String>, ClientId, Option<NotificationEnd>),
     LogError(Vec<String>, ClientId, Option<NotificationEnd>),
     SwitchSession(ConnectToSession, ClientId, Option<NotificationEnd>),
-    UnblockCliPipeInput(String),   // String -> Pipe name
+    SwitchSessionAndCloseCurrent(ConnectToSession, ClientId, Option<NotificationEnd>),
+    TerminalCommandSubmitted,
+    SessionRenamed(String),
+    UnblockCliPipeInput(String, Option<i32>),
     CliPipeOutput(String, String), // String -> Pipe name, String -> Output
     AssociatePipeWithClient {
         pipe_id: String,
@@ -131,11 +155,72 @@ pub enum ServerInstruction {
         write_config_to_disk: bool,
     },
     ConfigWrittenToDisk(Config),
+    WindowSettingsChanged(ClientId, Box<WindowSettings>),
+    FontFamilies(ClientId, Vec<String>),
+    HostTerminalThemeModeChanged(Option<ClientId>, HostTerminalThemeMode),
     FailedToWriteConfigToDisk(ClientId, Option<PathBuf>), // Pathbuf - file we failed to write
+    ReadConfig {
+        client_id: ClientId,
+        response_channel: crossbeam::channel::Sender<ConfigSnapshot>,
+    },
+    RevertConfig {
+        client_id: ClientId,
+        key: Option<SettingKey>,
+    },
+    UnsetConfigSetting {
+        client_id: ClientId,
+        key: SettingKey,
+    },
+    SaveConfig {
+        client_id: ClientId,
+    },
+    OverwriteConfigFile {
+        client_id: ClientId,
+    },
+    ReloadConfigFile {
+        client_id: ClientId,
+    },
+    SaveKeybindsAsPreset {
+        client_id: ClientId,
+        new_name: String,
+        response_channel: crossbeam::channel::Sender<Result<String, String>>,
+    },
+    CopyKeybindPreset {
+        client_id: ClientId,
+        preset: String,
+        new_name: String,
+        response_channel: crossbeam::channel::Sender<Result<String, String>>,
+    },
+    WriteThemeFile {
+        client_id: ClientId,
+        name: String,
+        copy_from: Option<String>,
+        colours: Vec<String>,
+        response_channel: crossbeam::channel::Sender<Result<String, String>>,
+    },
+    DeleteThemeFile {
+        client_id: ClientId,
+        name: String,
+        response_channel: crossbeam::channel::Sender<Result<String, String>>,
+    },
     RebindKeys {
         client_id: ClientId,
         keys_to_rebind: Vec<(InputMode, KeyWithModifier, Vec<Action>)>,
         keys_to_unbind: Vec<(InputMode, KeyWithModifier)>,
+        write_config_to_disk: bool,
+    },
+    ReplaceConfigBlocks {
+        client_id: ClientId,
+        config: String,
+    },
+    ResetKeys {
+        client_id: ClientId,
+        keys: Vec<(InputMode, KeyWithModifier)>,
+        write_config_to_disk: bool,
+    },
+    ResetMousebinds {
+        client_id: ClientId,
+        triggers: Vec<(InputMode, MouseTrigger)>,
         write_config_to_disk: bool,
     },
     StartWebServer(ClientId),
@@ -151,6 +236,7 @@ pub enum ServerInstruction {
     ForwardQueryToHost(u32, Vec<u8>, bool),
     KeyPassthroughChanged(ClientId, PaneId, PaneId, bool, Option<Direction>, bool),
     EmitNestedSessionFrameToClient(ClientId, Vec<u8>),
+    PopupStateChanged(ClientId, bool, bool),
 }
 
 impl From<&ServerInstruction> for ServerContext {
@@ -170,6 +256,11 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::Log(..) => ServerContext::Log,
             ServerInstruction::LogError(..) => ServerContext::LogError,
             ServerInstruction::SwitchSession(..) => ServerContext::SwitchSession,
+            ServerInstruction::SwitchSessionAndCloseCurrent(..) => {
+                ServerContext::SwitchSessionAndCloseCurrent
+            },
+            ServerInstruction::TerminalCommandSubmitted => ServerContext::TerminalCommandSubmitted,
+            ServerInstruction::SessionRenamed(..) => ServerContext::SessionRenamed,
             ServerInstruction::UnblockCliPipeInput(..) => ServerContext::UnblockCliPipeInput,
             ServerInstruction::CliPipeOutput(..) => ServerContext::CliPipeOutput,
             ServerInstruction::AssociatePipeWithClient { .. } => {
@@ -187,6 +278,19 @@ impl From<&ServerInstruction> for ServerContext {
                 ServerContext::FailedToWriteConfigToDisk
             },
             ServerInstruction::RebindKeys { .. } => ServerContext::RebindKeys,
+            ServerInstruction::ReplaceConfigBlocks { .. } => ServerContext::ReplaceConfigBlocks,
+            ServerInstruction::ResetKeys { .. } => ServerContext::ResetKeys,
+            ServerInstruction::ResetMousebinds { .. } => ServerContext::ResetMousebinds,
+            ServerInstruction::ReadConfig { .. } => ServerContext::ReadConfig,
+            ServerInstruction::RevertConfig { .. } => ServerContext::RevertConfig,
+            ServerInstruction::UnsetConfigSetting { .. } => ServerContext::UnsetConfigSetting,
+            ServerInstruction::SaveConfig { .. } => ServerContext::SaveConfig,
+            ServerInstruction::OverwriteConfigFile { .. } => ServerContext::OverwriteConfigFile,
+            ServerInstruction::ReloadConfigFile { .. } => ServerContext::ReloadConfigFile,
+            ServerInstruction::CopyKeybindPreset { .. } => ServerContext::CopyKeybindPreset,
+            ServerInstruction::SaveKeybindsAsPreset { .. } => ServerContext::SaveKeybindsAsPreset,
+            ServerInstruction::WriteThemeFile { .. } => ServerContext::WriteThemeFile,
+            ServerInstruction::DeleteThemeFile { .. } => ServerContext::DeleteThemeFile,
             ServerInstruction::StartWebServer(..) => ServerContext::StartWebServer,
             ServerInstruction::ShareCurrentSession(..) => ServerContext::ShareCurrentSession,
             ServerInstruction::StopSharingCurrentSession(..) => {
@@ -195,6 +299,11 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::WebServerStarted(..) => ServerContext::WebServerStarted,
             ServerInstruction::FailedToStartWebServer(..) => ServerContext::FailedToStartWebServer,
             ServerInstruction::ConfigWrittenToDisk(..) => ServerContext::ConfigWrittenToDisk,
+            ServerInstruction::WindowSettingsChanged(..) => ServerContext::WindowSettingsChanged,
+            ServerInstruction::FontFamilies(..) => ServerContext::FontFamilies,
+            ServerInstruction::HostTerminalThemeModeChanged(..) => {
+                ServerContext::HostTerminalThemeModeChanged
+            },
             ServerInstruction::SendWebClientsForbidden(..) => {
                 ServerContext::SendWebClientsForbidden
             },
@@ -207,6 +316,7 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::EmitNestedSessionFrameToClient(..) => {
                 ServerContext::EmitNestedSessionFrameToClient
             },
+            ServerInstruction::PopupStateChanged(..) => ServerContext::PopupStateChanged,
         }
     }
 }
@@ -218,7 +328,32 @@ impl ErrorInstruction for ServerInstruction {
 }
 
 #[derive(Debug, Clone, Default)]
+struct CommandLineSettings {
+    values: Config,
+    keys: BTreeSet<SettingKey>,
+    in_use: BTreeSet<SettingKey>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LayoutSettings {
+    file_values: Config,
+    layout_values: Config,
+    in_use: BTreeSet<SettingKey>,
+}
+
+fn settings_without_keybinds(first: &Config, second: &Config) -> BTreeSet<SettingKey> {
+    config_settings::differing_settings(first, second)
+        .into_iter()
+        .filter(|key| *key != SettingKey::Keybinds && *key != SettingKey::Mousebinds)
+        .collect()
+}
+
+#[derive(Debug, Clone, Default)]
 pub(crate) struct SessionConfiguration {
+    command_line_keybinds: HashMap<ClientId, Options>,
+    command_line_settings: HashMap<ClientId, CommandLineSettings>,
+    layout_settings: Option<LayoutSettings>,
+    base_modes: HashMap<ClientId, InputMode>,
     runtime_config: HashMap<ClientId, Config>, // if present, overrides the saved_config
     saved_config: Config,                      // the config as it is on disk (not guaranteed),
                                                // when changed, this resets the runtime config to
@@ -227,17 +362,423 @@ pub(crate) struct SessionConfiguration {
 }
 
 impl SessionConfiguration {
-    pub fn change_saved_config(&mut self, new_saved_config: Config) -> Vec<(ClientId, Config)> {
-        self.saved_config = new_saved_config.clone();
-
-        let mut config_changes = vec![];
-        for (client_id, current_runtime_config) in self.runtime_config.iter_mut() {
-            if *current_runtime_config != new_saved_config {
-                *current_runtime_config = new_saved_config.clone();
-                config_changes.push((*client_id, new_saved_config.clone()))
+    fn carry_session_keybinds_state(&self, new_saved_config: &mut Config) {
+        let old_layers = &self.saved_config.keybinds_layers;
+        let new_layers = &mut new_saved_config.keybinds_layers;
+        let mut changed = false;
+        if new_layers.layout.is_empty() && !old_layers.layout.is_empty() {
+            new_layers.layout = old_layers.layout.clone();
+            changed = true;
+        }
+        if new_layers.config_dir.is_none() && old_layers.config_dir.is_some() {
+            new_layers.config_dir = old_layers.config_dir.clone();
+            changed = true;
+        }
+        if new_layers.keybinds_dir_override.is_none() && old_layers.keybinds_dir_override.is_some()
+        {
+            new_layers.keybinds_dir_override = old_layers.keybinds_dir_override.clone();
+            changed = true;
+        }
+        if changed {
+            new_saved_config.resolve_keybinds();
+        }
+    }
+    pub fn set_layout_settings(&mut self, config_without_layout: Config) {
+        let in_use = settings_without_keybinds(&config_without_layout, &self.saved_config);
+        self.layout_settings = if in_use.is_empty() {
+            None
+        } else {
+            Some(LayoutSettings {
+                file_values: config_without_layout,
+                layout_values: self.saved_config.clone(),
+                in_use,
+            })
+        };
+    }
+    fn apply_layout_settings(&mut self, new_saved_config: &mut Config) {
+        let Some(layout_settings) = self.layout_settings.as_mut() else {
+            return;
+        };
+        let LayoutSettings {
+            ref file_values,
+            ref layout_values,
+            ref mut in_use,
+        } = *layout_settings;
+        let file_saved_config: &Config = new_saved_config;
+        in_use.retain(|key| {
+            !config_settings::settings_differ(file_saved_config, file_values, *key)
+                || !config_settings::settings_differ(file_saved_config, layout_values, *key)
+        });
+        for key in in_use.iter() {
+            config_settings::copy_setting(new_saved_config, layout_values, *key);
+        }
+    }
+    fn record_command_line_settings(&mut self, client_id: ClientId, client_config: &Config) {
+        let keys = settings_without_keybinds(&self.saved_config, client_config);
+        if keys.is_empty() {
+            self.command_line_settings.remove(&client_id);
+        } else {
+            self.command_line_settings.insert(
+                client_id,
+                CommandLineSettings {
+                    values: client_config.clone(),
+                    in_use: keys.clone(),
+                    keys,
+                },
+            );
+        }
+    }
+    fn forget_command_line_settings(
+        &mut self,
+        client_id: &ClientId,
+        keys: impl IntoIterator<Item = SettingKey>,
+    ) {
+        if let Some(command_line_settings) = self.command_line_settings.get_mut(client_id) {
+            for key in keys {
+                command_line_settings.in_use.remove(&key);
             }
         }
-        config_changes
+    }
+    fn saved_config_for_settings_of(&self, client_id: &ClientId, current: &Config) -> Config {
+        let mut saved = self.saved_config.clone();
+        if let Some(command_line_settings) = self.command_line_settings.get(client_id) {
+            for key in &command_line_settings.in_use {
+                config_settings::copy_setting(&mut saved, current, *key);
+            }
+        }
+        saved
+    }
+    pub fn client_config_to_save(&self, client_id: &ClientId) -> Config {
+        let mut config = self.get_client_configuration(client_id);
+        if let Some(command_line_settings) = self.command_line_settings.get(client_id) {
+            for key in &command_line_settings.in_use {
+                config_settings::copy_setting(&mut config, &self.saved_config, *key);
+            }
+        }
+        config
+    }
+    pub fn take_base_mode_change(&mut self, client_id: ClientId, base_mode: InputMode) -> bool {
+        match self.base_modes.insert(client_id, base_mode) {
+            Some(previous_base_mode) => previous_base_mode != base_mode,
+            None => false,
+        }
+    }
+    pub fn client_ids(&self) -> Vec<ClientId> {
+        let mut client_ids: Vec<ClientId> = self.runtime_config.keys().copied().collect();
+        client_ids.sort();
+        client_ids
+    }
+    pub fn save_keybinds_as_preset(
+        &self,
+        client_id: &ClientId,
+        config_file_path: Option<&PathBuf>,
+        new_name: &str,
+    ) -> Result<String, String> {
+        let config = self.get_client_configuration(client_id);
+        let keybinds_dir = config
+            .keybinds_dir()
+            .ok_or_else(|| "There is no keybinds folder to save the preset to".to_owned())?;
+        let file_contents = config_file_path.and_then(|path| std::fs::read_to_string(path).ok());
+        let saved = &self.saved_config;
+        save_keybinds_as_preset(
+            file_contents.as_deref(),
+            &saved.keybinds_layers.user,
+            &saved.keybinds_layers.user_mouse,
+            saved.keybinds_layers.config_default_mode,
+            new_name,
+            &keybinds_dir,
+        )
+        .map(|_| new_name.to_owned())
+    }
+    pub fn copy_keybind_preset(
+        &self,
+        client_id: &ClientId,
+        preset: &str,
+        new_name: &str,
+    ) -> Result<String, String> {
+        let config = self.get_client_configuration(client_id);
+        let keybinds_dir = config
+            .keybinds_dir()
+            .ok_or_else(|| "There is no keybinds folder to copy the preset to".to_owned())?;
+        copy_keybind_preset_to_folder(
+            preset,
+            new_name,
+            &keybinds_dir,
+            config.keybinds_config_dir().as_deref(),
+        )
+        .map(|_| new_name.to_owned())
+    }
+    pub fn write_theme_file(
+        &self,
+        client_id: &ClientId,
+        name: &str,
+        copy_from: Option<&str>,
+        colours: &[String],
+    ) -> Result<(PathBuf, Theme), String> {
+        let config = self.get_client_configuration(client_id);
+        let theme_dir = config_blocks::theme_dir(&config)
+            .ok_or_else(|| "There is no theme folder to write the theme to".to_owned())?;
+        match copy_from {
+            Some(from) => {
+                if config.themes.get_theme(name).is_some() {
+                    return Err(format!("A theme called {} already exists", name));
+                }
+                let source = config
+                    .themes
+                    .get_theme(from)
+                    .ok_or_else(|| format!("There is no theme called {}", from))?;
+                let path = config_blocks::create_theme_file(
+                    &theme_dir,
+                    name,
+                    &source.palette,
+                    source.terminal_colors.as_ref(),
+                )?;
+                Ok((
+                    path,
+                    Theme {
+                        sourced_from_external_file: true,
+                        palette: source.palette.clone(),
+                        terminal_colors: source.terminal_colors,
+                    },
+                ))
+            },
+            None => {
+                let path = config_blocks::theme_files(&theme_dir)
+                    .remove(name)
+                    .ok_or_else(|| {
+                        format!(
+                            "No file in {} defines the theme {}",
+                            theme_dir.display(),
+                            name
+                        )
+                    })?;
+                let palette = config_blocks::styling_from_colours(colours);
+                config_blocks::update_theme_file(&path, name, &palette)?;
+                Ok((
+                    path,
+                    Theme {
+                        sourced_from_external_file: true,
+                        palette,
+                        terminal_colors: config
+                            .themes
+                            .get_theme(name)
+                            .and_then(|theme| theme.terminal_colors),
+                    },
+                ))
+            },
+        }
+    }
+    pub fn saved_config_with_theme(&self, name: &str, theme: Option<Theme>) -> Config {
+        let mut config = self.saved_config.clone();
+        config.themes.remove(name);
+        if let Some(theme) = theme {
+            config.themes.insert(name.to_owned(), theme);
+        }
+        config
+    }
+    pub fn delete_theme_file(
+        &self,
+        client_id: &ClientId,
+        name: &str,
+    ) -> Result<(PathBuf, Option<Theme>), String> {
+        let config = self.get_client_configuration(client_id);
+        let theme_dir = config_blocks::theme_dir(&config)
+            .ok_or_else(|| "There is no theme folder to delete the theme from".to_owned())?;
+        let path = config_blocks::theme_files(&theme_dir)
+            .remove(name)
+            .ok_or_else(|| {
+                format!(
+                    "No file in {} defines the theme {}",
+                    theme_dir.display(),
+                    name
+                )
+            })?;
+        config_blocks::delete_theme_from_file(&path, name)?;
+        let replacement = config_blocks::theme_files(&theme_dir)
+            .remove(name)
+            .and_then(|other| Themes::from_path(other).ok())
+            .and_then(|themes| themes.get_theme(name).cloned())
+            .or_else(|| config_blocks::built_in_themes().get_theme(name).cloned());
+        Ok((path, replacement))
+    }
+    pub fn change_saved_config(
+        &mut self,
+        mut new_saved_config: Config,
+    ) -> (Vec<(ClientId, Config)>, Vec<(ClientId, Vec<SettingKey>)>) {
+        self.carry_session_keybinds_state(&mut new_saved_config);
+        self.apply_layout_settings(&mut new_saved_config);
+        let only_the_preset_files_changed =
+            self.saved_config.keybinds_layers.user == new_saved_config.keybinds_layers.user;
+        let old_saved_config = std::mem::replace(&mut self.saved_config, new_saved_config.clone());
+        let changed_in_file: HashSet<SettingKey> =
+            config_settings::differing_settings(&old_saved_config, &new_saved_config)
+                .into_iter()
+                .collect();
+        let mut config_changes = vec![];
+        let mut dropped_changes = vec![];
+        let mut client_ids: Vec<ClientId> = self.runtime_config.keys().copied().collect();
+        client_ids.sort();
+        for client_id in client_ids {
+            let Some(current_runtime_config) = self.runtime_config.get(&client_id).cloned() else {
+                continue;
+            };
+            let mut rebased_config = new_saved_config.clone();
+            rebased_config.set_command_line_keybinds(&current_runtime_config.options);
+            let mut dropped = vec![];
+            for key in
+                config_settings::differing_settings(&current_runtime_config, &old_saved_config)
+            {
+                if !changed_in_file.contains(&key)
+                    || (key == SettingKey::Keybinds && only_the_preset_files_changed)
+                {
+                    config_settings::copy_setting(
+                        &mut rebased_config,
+                        &current_runtime_config,
+                        key,
+                    );
+                } else if config_settings::settings_differ(
+                    &current_runtime_config,
+                    &new_saved_config,
+                    key,
+                ) {
+                    dropped.push(key);
+                }
+            }
+            if let Some(command_line_settings) = self.command_line_settings.get(&client_id) {
+                for key in &command_line_settings.in_use {
+                    config_settings::copy_setting(
+                        &mut rebased_config,
+                        &command_line_settings.values,
+                        *key,
+                    );
+                }
+                dropped.retain(|key| !command_line_settings.in_use.contains(key));
+            }
+            if rebased_config.has_command_line_keybinds() {
+                rebased_config.resolve_keybinds();
+            }
+            self.share_keybinds(&mut rebased_config);
+            if rebased_config != current_runtime_config {
+                self.runtime_config
+                    .insert(client_id, rebased_config.clone());
+                config_changes.push((client_id, rebased_config));
+            }
+            if !dropped.is_empty() {
+                dropped_changes.push((client_id, dropped));
+            }
+        }
+        (config_changes, dropped_changes)
+    }
+    pub fn config_snapshot(
+        &self,
+        client_id: &ClientId,
+        config_file_path: Option<&PathBuf>,
+    ) -> ConfigSnapshot {
+        let current = self.get_client_configuration(client_id);
+        let saved = &self.saved_config;
+        let file_contents = config_file_path.and_then(|path| std::fs::read_to_string(path).ok());
+        let set_in_file = file_contents
+            .as_deref()
+            .map(config_settings::settings_set_in_file)
+            .unwrap_or_default();
+        let keybinds_vec = current.keybinds.to_keybinds_vec();
+        let base_mode = current.options.default_mode.unwrap_or_default();
+        let saved_for_settings = self.saved_config_for_settings_of(client_id, &current);
+        let settings = config_settings::setting_states(&saved_for_settings, &current, &set_in_file);
+        let pending_restart_settings = settings
+            .iter()
+            .filter(|setting| setting.key.requires_restart() && setting.is_unsaved())
+            .map(|setting| setting.key)
+            .collect();
+        ConfigSnapshot {
+            settings,
+            config_file_path: config_file_path.map(|path| path.display().to_string()),
+            backup_file_path: config_file_path
+                .map(|path| Config::backup_file_path(path))
+                .map(|path| path.display().to_string()),
+            pending_restart_settings,
+            theme_names: config_settings::theme_names(&current),
+            plugin_aliases: config_settings::plugin_alias_lines(&current),
+            load_plugins: config_settings::load_plugin_lines(&current),
+            env_vars: config_settings::env_lines(&current),
+            context_menu_items: config_settings::context_menu_lines(&current),
+            blocks: config_blocks::config_blocks(&current, true, Some((&keybinds_vec, base_mode))),
+            saved_blocks: config_blocks::config_blocks(saved, false, None),
+            default_blocks: config_blocks::config_blocks(
+                config_settings::default_config(),
+                false,
+                None,
+            ),
+            keybindings: config_blocks::keybinding_entries(
+                saved,
+                &current,
+                file_contents.as_deref(),
+            ),
+            keybinds: current.keybinds_selection_snapshot(),
+            mousebindings: config_blocks::mousebinding_entries(saved, &current),
+            font_families: vec![],
+        }
+    }
+    fn replace_runtime_config_if_changed(
+        &mut self,
+        client_id: &ClientId,
+        current: Config,
+        mut new_config: Config,
+    ) -> Option<Config> {
+        self.share_keybinds(&mut new_config);
+        if new_config == current {
+            return None;
+        }
+        self.runtime_config.insert(*client_id, new_config.clone());
+        Some(new_config)
+    }
+    pub fn revert_runtime_config(
+        &mut self,
+        client_id: &ClientId,
+        key: Option<SettingKey>,
+    ) -> Option<Config> {
+        let current = self.get_client_configuration(client_id);
+        let mut reverted = current.clone();
+        let keys = match key {
+            Some(key) => vec![key],
+            None => SettingKey::all(),
+        };
+        let reverts_keybinds = keys.contains(&SettingKey::Keybinds);
+        for key in &keys {
+            config_settings::copy_setting(&mut reverted, &self.saved_config, *key);
+        }
+        if let Some(command_line_settings) = self.command_line_settings.get_mut(client_id) {
+            for key in &keys {
+                if command_line_settings.keys.contains(key) {
+                    config_settings::copy_setting(
+                        &mut reverted,
+                        &command_line_settings.values,
+                        *key,
+                    );
+                    command_line_settings.in_use.insert(*key);
+                }
+            }
+        }
+        if reverts_keybinds {
+            let command_line_keybinds = self
+                .command_line_keybinds
+                .get(client_id)
+                .cloned()
+                .unwrap_or_default();
+            reverted.apply_command_line_keybinds(&command_line_keybinds);
+        }
+        self.replace_runtime_config_if_changed(client_id, current, reverted)
+    }
+    pub fn unset_runtime_config_setting(
+        &mut self,
+        client_id: &ClientId,
+        key: SettingKey,
+    ) -> Option<Config> {
+        let current = self.get_client_configuration(client_id);
+        let mut unset = current.clone();
+        config_settings::unset_setting(&mut unset, key);
+        self.forget_command_line_settings(client_id, [key]);
+        self.replace_runtime_config_if_changed(client_id, current, unset)
     }
     pub fn set_saved_configuration(&mut self, config: Config) {
         self.saved_config = config;
@@ -247,7 +788,22 @@ impl SessionConfiguration {
         client_id: ClientId,
         mut client_config: Config,
     ) {
+        let mut command_line_keybinds = Options::default();
+        command_line_keybinds.keybinds_preset = client_config.options.keybinds_preset.clone();
+        command_line_keybinds.keybinds_primary = client_config.options.keybinds_primary.clone();
+        command_line_keybinds.keybinds_secondary = client_config.options.keybinds_secondary.clone();
+        command_line_keybinds.keybinds_unlock = client_config.options.keybinds_unlock.clone();
+        self.command_line_keybinds
+            .insert(client_id, command_line_keybinds);
+        if client_config.has_command_line_keybinds() {
+            client_config.resolve_keybinds();
+        }
         self.share_keybinds(&mut client_config);
+        self.record_command_line_settings(client_id, &client_config);
+        self.base_modes.insert(
+            client_id,
+            client_config.options.default_mode.unwrap_or_default(),
+        );
         self.runtime_config.insert(client_id, client_config);
     }
     fn share_keybinds(&self, config: &mut Config) {
@@ -261,6 +817,9 @@ impl SessionConfiguration {
         }
     }
     pub fn remove_client(&mut self, client_id: &ClientId) {
+        self.command_line_keybinds.remove(client_id);
+        self.command_line_settings.remove(client_id);
+        self.base_modes.remove(client_id);
         self.runtime_config.remove(client_id);
     }
     pub fn get_client_keybinds(&self, client_id: &ClientId) -> &Keybinds {
@@ -292,12 +851,20 @@ impl SessionConfiguration {
         let mut full_reconfigured_config = None;
         let mut config_changed = false;
         let current_client_configuration = self.get_client_configuration(client_id);
-        match Config::from_kdl(
-            &stringified_config,
-            Some(current_client_configuration.clone()),
-        ) {
+        let mut base_config = current_client_configuration.clone();
+        if chooses_keybind_preset_or_leaders(&stringified_config) {
+            base_config.clear_command_line_keybinds();
+        }
+        match Config::from_kdl(&stringified_config, Some(base_config)) {
             Ok(mut new_config) => {
                 self.share_keybinds(&mut new_config);
+                let mut touched_settings =
+                    config_settings::settings_set_in_file(&stringified_config);
+                touched_settings.extend(config_settings::differing_settings(
+                    &current_client_configuration,
+                    &new_config,
+                ));
+                self.forget_command_line_settings(client_id, touched_settings);
                 config_changed = current_client_configuration != new_config;
                 full_reconfigured_config = Some(new_config.clone());
                 self.runtime_config.insert(*client_id, new_config);
@@ -308,79 +875,185 @@ impl SessionConfiguration {
         }
         (full_reconfigured_config, config_changed)
     }
+    pub fn saved_configuration(&self) -> &Config {
+        &self.saved_config
+    }
+    pub fn save_change_to_file(
+        &self,
+        config_file_path: &Path,
+        last_read: Option<&str>,
+        base: &Config,
+        target: &Config,
+        overwrite: bool,
+    ) -> SaveOutcome {
+        save_config_in_place(
+            config_file_path,
+            last_read,
+            &self.saved_config,
+            base,
+            target,
+            overwrite,
+        )
+    }
+    #[cfg(test)]
+    pub fn save_client_config_to_file(
+        &self,
+        client_id: &ClientId,
+        config_file_path: &Path,
+        last_read: Option<&str>,
+        overwrite: bool,
+    ) -> SaveOutcome {
+        let runtime = self.client_config_to_save(client_id);
+        self.save_change_to_file(
+            config_file_path,
+            last_read,
+            &self.saved_config,
+            &runtime,
+            overwrite,
+        )
+    }
     pub fn rebind_keys(
         &mut self,
         client_id: &ClientId,
         keys_to_rebind: Vec<(InputMode, KeyWithModifier, Vec<Action>)>,
         keys_to_unbind: Vec<(InputMode, KeyWithModifier)>,
     ) -> (Option<Config>, bool) {
-        let mut full_reconfigured_config = None;
-        let mut config_changed = false;
-
-        if self.runtime_config.get(client_id).is_none() {
-            self.runtime_config
-                .insert(*client_id, self.saved_config.clone());
+        let current = self.get_client_configuration(client_id);
+        let mut changes = KeybindChanges::default();
+        for (input_mode, key_with_modifier) in keys_to_unbind {
+            changes.unbind(input_mode, key_with_modifier);
         }
-        let mut rebound_config = None;
-        match self.runtime_config.get_mut(client_id) {
-            Some(config) => {
-                for (input_mode, key_with_modifier) in keys_to_unbind {
-                    let needs_change = config
-                        .keybinds
-                        .0
-                        .get(&input_mode)
-                        .map(|keys_in_mode| keys_in_mode.contains_key(&key_with_modifier))
-                        .unwrap_or(true);
-                    if !needs_change {
-                        continue;
-                    }
-                    let keys_in_mode = Arc::make_mut(&mut config.keybinds)
-                        .0
-                        .entry(input_mode)
-                        .or_insert_with(Default::default);
-                    let removed = keys_in_mode.remove(&key_with_modifier);
-                    if removed.is_some() {
-                        config_changed = true;
-                    }
-                }
-                for (input_mode, key_with_modifier, actions) in keys_to_rebind {
-                    let needs_change = config
-                        .keybinds
-                        .0
-                        .get(&input_mode)
-                        .map(|keys_in_mode| keys_in_mode.get(&key_with_modifier) != Some(&actions))
-                        .unwrap_or(true);
-                    if !needs_change {
-                        continue;
-                    }
-                    let keys_in_mode = Arc::make_mut(&mut config.keybinds)
-                        .0
-                        .entry(input_mode)
-                        .or_insert_with(Default::default);
-                    if keys_in_mode.get(&key_with_modifier) != Some(&actions) {
-                        config_changed = true;
-                        keys_in_mode.insert(key_with_modifier, actions);
-                    }
-                }
-                if config_changed {
-                    rebound_config = Some(config.clone());
-                }
-            },
-            None => {
-                log::error!(
-                    "Could not find runtime or saved configuration for client, cannot rebind keys"
-                );
-            },
+        for (input_mode, key_with_modifier, actions) in keys_to_rebind {
+            changes.bind(input_mode, key_with_modifier, actions);
         }
-        if let Some(mut config) = rebound_config {
-            self.runtime_config.remove(client_id);
-            self.share_keybinds(&mut config);
-            self.runtime_config.insert(*client_id, config.clone());
-            full_reconfigured_config = Some(config);
+        let mut rebound_config = current.clone();
+        rebound_config.keybinds_layers.user.changes.compose(changes);
+        rebound_config.resolve_keybinds();
+        if rebound_config.keybinds == current.keybinds {
+            return (None, false);
         }
-
-        (full_reconfigured_config, config_changed)
+        self.share_keybinds(&mut rebound_config);
+        self.runtime_config
+            .insert(*client_id, rebound_config.clone());
+        (Some(rebound_config), true)
     }
+}
+
+impl SessionConfiguration {
+    pub fn replace_config_blocks(
+        &mut self,
+        client_id: &ClientId,
+        stringified_blocks: &str,
+    ) -> (Option<Config>, bool) {
+        let current = self.get_client_configuration(client_id);
+        let mut replaced = current.clone();
+        if let Err(e) = config_blocks::replace_config_blocks(&mut replaced, stringified_blocks) {
+            log::error!("Failed to replace config blocks: {}", e);
+            return (None, false);
+        }
+        let touched_settings = config_settings::differing_settings(&current, &replaced);
+        self.forget_command_line_settings(client_id, touched_settings);
+        match self.replace_runtime_config_if_changed(client_id, current, replaced) {
+            Some(new_config) => (Some(new_config), true),
+            None => (None, false),
+        }
+    }
+    pub fn reset_keys(
+        &mut self,
+        client_id: &ClientId,
+        keys: Vec<(InputMode, KeyWithModifier)>,
+    ) -> (Option<Config>, bool) {
+        let current = self.get_client_configuration(client_id);
+        let mut reset = current.clone();
+        for (mode, key) in keys {
+            if let Some(mode_changes) = reset.keybinds_layers.user.changes.modes.get_mut(&mode) {
+                mode_changes.bind.remove(&key);
+                mode_changes.unbind.remove(&key);
+                if mode_changes.is_empty() {
+                    reset.keybinds_layers.user.changes.modes.remove(&mode);
+                }
+            }
+        }
+        reset.resolve_keybinds();
+        match self.replace_runtime_config_if_changed(client_id, current, reset) {
+            Some(new_config) => (Some(new_config), true),
+            None => (None, false),
+        }
+    }
+    pub fn reset_mousebinds(
+        &mut self,
+        client_id: &ClientId,
+        triggers: Vec<(InputMode, MouseTrigger)>,
+    ) -> (Option<Config>, bool) {
+        let current = self.get_client_configuration(client_id);
+        let mut reset = current.clone();
+        for (mode, trigger) in triggers {
+            let user_mouse = &mut reset.keybinds_layers.user_mouse;
+            if let Some(mode_changes) = user_mouse.modes.get_mut(&mode) {
+                mode_changes.bind.remove(&trigger);
+                mode_changes.unbind.remove(&trigger);
+                if mode_changes.is_empty() {
+                    user_mouse.modes.remove(&mode);
+                }
+            }
+        }
+        reset.resolve_keybinds();
+        match self.replace_runtime_config_if_changed(client_id, current, reset) {
+            Some(new_config) => (Some(new_config), true),
+            None => (None, false),
+        }
+    }
+}
+
+fn chooses_keybind_preset_or_leaders(stringified_config: &str) -> bool {
+    stringified_config
+        .parse::<kdl::KdlDocument>()
+        .ok()
+        .and_then(|document| document.get("keybinds").cloned())
+        .map(|keybinds| {
+            ["preset", "primary", "secondary", "unlock"]
+                .iter()
+                .any(|attribute| keybinds.get(*attribute).is_some())
+        })
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct KeybindsDirWatcher {
+    watched_dir: Option<PathBuf>,
+    stop: Option<Arc<AtomicBool>>,
+}
+
+impl KeybindsDirWatcher {
+    pub fn watched_dir(&self) -> Option<&PathBuf> {
+        self.watched_dir.as_ref()
+    }
+    pub fn needs_restart(&self, new_dir: &Option<PathBuf>) -> bool {
+        self.watched_dir() != new_dir.as_ref()
+    }
+    pub fn stop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop.store(true, Ordering::SeqCst);
+        }
+    }
+    pub fn restart(
+        &mut self,
+        new_dir: Option<PathBuf>,
+        to_plugin: SenderWithContext<PluginInstruction>,
+    ) {
+        self.stop();
+        self.watched_dir = new_dir.clone();
+        if let Some(new_dir) = new_dir {
+            self.stop = Some(report_changes_in_keybinds_dir(new_dir, to_plugin));
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ConfigFileState {
+    pub contents_when_read: Option<String>,
+    pub config_dir: Option<PathBuf>,
+    pub keybinds_dir_watcher: Option<KeybindsDirWatcher>,
 }
 
 pub(crate) struct SessionMetaData {
@@ -389,6 +1062,9 @@ pub(crate) struct SessionMetaData {
     pub current_input_modes: HashMap<ClientId, InputMode>,
     pub session_configuration: SessionConfiguration,
     pub key_passthrough_clients: HashMap<ClientId, PaneId>,
+    pub popup_clients: HashSet<ClientId>,
+    pub modal_popup_clients: HashSet<ClientId>,
+    pub terminal_command_submitted: Arc<std::sync::atomic::AtomicBool>,
     pub web_sharing: WebSharing, // this is a special attribute explicitly set on session
     // initialization because we don't want it to be overridden by
     // configuration changes, the only way it can be overwritten is by
@@ -399,9 +1075,54 @@ pub(crate) struct SessionMetaData {
     pty_writer_thread: Option<thread::JoinHandle<()>>,
     background_jobs_thread: Option<thread::JoinHandle<()>>,
     config_file_path: Option<PathBuf>,
+    config_file: ConfigFileState,
+    applied_env: AppliedEnv,
+    sent_window_settings: HashMap<ClientId, WindowSettings>,
+    font_families: HashMap<ClientId, Vec<String>>,
 }
 
 impl SessionMetaData {
+    fn send_window_settings_if_changed(&mut self, client_id: ClientId, config: &Config) {
+        let settings = WindowSettings::from_config(config);
+        if self.sent_window_settings.get(&client_id) == Some(&settings) {
+            return;
+        }
+        self.sent_window_settings
+            .insert(client_id, settings.clone());
+        let _ = self
+            .senders
+            .send_to_server(ServerInstruction::WindowSettingsChanged(
+                client_id,
+                Box::new(settings),
+            ));
+    }
+    fn forget_window_client(&mut self, client_id: ClientId) {
+        self.sent_window_settings.remove(&client_id);
+        self.font_families.remove(&client_id);
+    }
+    fn config_snapshot_for(&self, client_id: ClientId) -> ConfigSnapshot {
+        let mut snapshot = self
+            .session_configuration
+            .config_snapshot(&client_id, self.config_file_path.as_ref());
+        snapshot.font_families = self.font_families_for(client_id);
+        snapshot
+    }
+    fn font_families_for(&self, client_id: ClientId) -> Vec<String> {
+        self.font_families
+            .get(&client_id)
+            .or_else(|| {
+                self.font_families
+                    .iter()
+                    .filter(|(_, families)| !families.is_empty())
+                    .min_by_key(|(id, _)| **id)
+                    .map(|(_, families)| families)
+            })
+            .cloned()
+            .unwrap_or_default()
+    }
+    fn sync_pane_env(&mut self, env: &HashMap<String, String>) {
+        self.applied_env.sync(env);
+    }
     pub fn get_client_keybinds_and_mode(
         &self,
         client_id: &ClientId,
@@ -420,6 +1141,8 @@ impl SessionMetaData {
         }
     }
     pub fn remove_key_passthrough_client(&mut self, client_id: ClientId) {
+        self.popup_clients.remove(&client_id);
+        self.modal_popup_clients.remove(&client_id);
         self.remove_key_passthrough_client_with_notify(client_id, true);
     }
     pub fn remove_key_passthrough_client_with_notify(
@@ -449,6 +1172,30 @@ impl SessionMetaData {
             self.current_input_modes.insert(client_id, input_mode);
         }
     }
+    pub fn follow_keybinds_dir(&mut self, config: &Config) {
+        let Some(watcher) = self.config_file.keybinds_dir_watcher.as_mut() else {
+            return;
+        };
+        let new_dir = config.keybinds_dir();
+        if !watcher.needs_restart(&new_dir) {
+            return;
+        }
+        let Some(to_plugin) = self.senders.to_plugin.clone() else {
+            return;
+        };
+        watcher.restart(new_dir.clone(), to_plugin.clone());
+        let active_preset_files: Vec<PathBuf> = config
+            .active_keybind_preset_file()
+            .filter(|_| config.keybinds_layers.active.info.source == KeybindPresetSource::File)
+            .into_iter()
+            .collect();
+        let (presets, preset_errors) =
+            list_keybind_presets(new_dir.as_deref(), &active_preset_files);
+        let _ = to_plugin.send(PluginInstruction::KeybindPresetListUpdate(
+            presets,
+            preset_errors,
+        ));
+    }
     pub fn propagate_configuration_changes(
         &mut self,
         config_changes: Vec<(ClientId, Config)>,
@@ -457,6 +1204,14 @@ impl SessionMetaData {
         let mut new_plugin_config = None;
         let mut converted_keybinds: Vec<(Arc<Keybinds>, SharedKeybinds)> = vec![];
         for (client_id, new_config) in config_changes {
+            self.send_window_settings_if_changed(client_id, &new_config);
+            self.follow_keybinds_dir(&new_config);
+            self.sync_pane_env(new_config.env.inner());
+            let pane_env = self.applied_env.pane_env();
+            let base_mode = new_config.options.default_mode.unwrap_or_default();
+            let base_mode_changed = self
+                .session_configuration
+                .take_base_mode_change(client_id, base_mode);
             if new_plugin_config.is_none() {
                 new_plugin_config = Some(new_config.plugins.clone());
             }
@@ -469,16 +1224,8 @@ impl SessionMetaData {
                     ..Default::default()
                 })
             });
-            let host_theme_dark = new_config
-                .options
-                .theme_dark
-                .as_ref()
-                .and_then(|name| new_config.theme_config(Some(name)));
-            let host_theme_light = new_config
-                .options
-                .theme_light
-                .as_ref()
-                .and_then(|name| new_config.theme_config(Some(name)));
+            let host_theme_dark = new_config.theme_dark().map(|theme| theme.palette);
+            let host_theme_light = new_config.theme_light().map(|theme| theme.palette);
             if new_config.options.theme_dark.is_some() && host_theme_dark.is_none() {
                 log::warn!(
                     "theme_dark='{}' not found in themes; auto-theme switch disabled for dark.",
@@ -505,6 +1252,18 @@ impl SessionMetaData {
                 },
             };
             self.senders
+                .send_to_screen(ScreenInstruction::UpdateContextMenuConfig(
+                    client_id,
+                    new_config.context_menu.clone(),
+                ))
+                .unwrap();
+            self.senders
+                .send_to_screen(ScreenInstruction::UpdateMousebinds(
+                    client_id,
+                    new_config.mousebinds.clone(),
+                ))
+                .unwrap();
+            self.senders
                 .send_to_screen(ScreenInstruction::Reconfigure {
                     client_id,
                     keybinds: shared_keybinds.clone(),
@@ -514,12 +1273,15 @@ impl SessionMetaData {
                         .unwrap_or_else(Default::default),
                     theme: new_config
                         .theme_config(new_config.options.theme.as_ref())
-                        .unwrap_or_else(|| default_palette().into()),
+                        .unwrap_or_else(Styling::default),
                     host_theme_dark,
                     host_theme_light,
                     explicit_theme_hue: new_config.options.explicit_theme_hue,
                     simplified_ui: new_config.options.simplified_ui.unwrap_or(false),
-                    default_shell: new_config.options.default_shell,
+                    default_shell: new_config
+                        .options
+                        .default_shell
+                        .or_else(|| env_value(&pane_env, "SHELL").map(PathBuf::from)),
                     pane_frame_style,
                     copy_command: new_config.options.copy_command,
                     copy_to_clipboard: new_config.options.copy_clipboard,
@@ -534,7 +1296,11 @@ impl SessionMetaData {
                         .resolved_floating_border_style(),
                     stacked_resize: new_config.options.stacked_resize.unwrap_or(true),
                     stacked_pane_list: new_config.options.stacked_pane_list.unwrap_or(true),
-                    default_editor: new_config.options.scrollback_editor.clone(),
+                    default_editor: new_config.options.scrollback_editor.clone().or_else(|| {
+                        env_value(&pane_env, "EDITOR")
+                            .or_else(|| env_value(&pane_env, "VISUAL"))
+                            .map(PathBuf::from)
+                    }),
                     advanced_mouse_actions: new_config
                         .options
                         .advanced_mouse_actions
@@ -546,6 +1312,7 @@ impl SessionMetaData {
                     visual_bell: new_config.options.visual_bell.unwrap_or(true),
                     focus_follows_mouse: new_config.options.focus_follows_mouse.unwrap_or(false),
                     mouse_click_through: new_config.options.mouse_click_through.unwrap_or(false),
+                    context_menu_enabled: new_config.options.context_menu_enabled.unwrap_or(true),
                     osc133_command_selection: new_config
                         .options
                         .osc133_command_selection
@@ -569,6 +1336,39 @@ impl SessionMetaData {
                         .unwrap_or_default(),
                 })
                 .unwrap();
+            let _ = self
+                .senders
+                .send_to_screen(ScreenInstruction::SetSwapLayoutNotification(
+                    new_config.options.swap_layout_notification.unwrap_or(true),
+                ));
+            let _ = self
+                .senders
+                .send_to_screen(ScreenInstruction::SetGraphemeClusters(
+                    new_config.options.grapheme_clusters.unwrap_or(true),
+                ));
+            let _ = self.senders.send_to_screen(ScreenInstruction::SetOnQuit(
+                new_config.options.on_quit.unwrap_or_default(),
+            ));
+            let _ = self
+                .senders
+                .send_to_background_jobs(BackgroundJob::SessionSuggestions(
+                    SessionSuggestionsJob::Configure {
+                        config: new_config.session_suggestions.clone(),
+                        session_card: new_config.options.session_card.unwrap_or(true),
+                        session_indicator: new_config.options.session_indicator.unwrap_or(true),
+                    },
+                ));
+            if base_mode_changed {
+                self.current_input_modes.insert(client_id, base_mode);
+                self.senders
+                    .send_to_screen(ScreenInstruction::ChangeMode(
+                        base_mode,
+                        Some(base_mode),
+                        client_id,
+                        None,
+                    ))
+                    .unwrap();
+            }
             self.senders
                 .send_to_plugin(PluginInstruction::Reconfigure {
                     client_id,
@@ -584,6 +1384,7 @@ impl SessionMetaData {
                     client_id,
                     default_editor: new_config.options.scrollback_editor,
                     post_command_discovery_hook: new_config.options.post_command_discovery_hook,
+                    pane_env: pane_env.clone(),
                 })
                 .unwrap();
         }
@@ -601,6 +1402,9 @@ impl SessionMetaData {
 
 impl Drop for SessionMetaData {
     fn drop(&mut self) {
+        if let Some(watcher) = self.config_file.keybinds_dir_watcher.as_mut() {
+            watcher.stop();
+        }
         let _ = self.senders.send_to_pty(PtyInstruction::Exit);
         let _ = self.senders.send_to_screen(ScreenInstruction::Exit);
         let _ = self.senders.send_to_plugin(PluginInstruction::Exit);
@@ -638,6 +1442,11 @@ fn remove_client_and_flush_forwards(
 ) {
     let _ = os_input.remove_client(client_id);
     let stuck_tokens = session_state.write().unwrap().remove_client(client_id);
+    if let Ok(mut session) = session_data.try_write() {
+        if let Some(session) = session.as_mut() {
+            session.forget_window_client(client_id);
+        }
+    }
     if stuck_tokens.is_empty() {
         return;
     }
@@ -712,6 +1521,20 @@ pub(crate) struct SessionState {
 }
 
 impl SessionState {
+    pub fn attached_client_count(&self) -> usize {
+        let pipe_ids: HashSet<ClientId> = self.pipes.values().copied().collect();
+        self.clients
+            .iter()
+            .filter(|(client_id, data)| data.is_some() && !pipe_ids.contains(client_id))
+            .count()
+    }
+    pub fn other_clients_are_attached(&self, client_id: ClientId) -> bool {
+        let pipe_ids: HashSet<ClientId> = self.pipes.values().copied().collect();
+        self.clients
+            .iter()
+            .any(|(id, data)| *id != client_id && data.is_some() && !pipe_ids.contains(id))
+            || !self.watchers.is_empty()
+    }
     pub fn new() -> Self {
         SessionState {
             clients: HashMap::new(),
@@ -864,6 +1687,134 @@ impl SessionState {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AppliedEnv {
+    config: HashMap<String, String>,
+    original_values: HashMap<String, Option<String>>,
+}
+
+impl AppliedEnv {
+    fn at_startup(env: &HashMap<String, String>) -> Self {
+        let values_before_config = zellij_utils::envs::take_env_values_before_config();
+        Self::at_startup_with(env, values_before_config)
+    }
+    fn at_startup_with(
+        env: &HashMap<String, String>,
+        values_before_config: HashMap<String, Option<String>>,
+    ) -> Self {
+        let original_values = env
+            .iter()
+            .map(|(name, value)| {
+                let original = match values_before_config.get(name) {
+                    Some(before) => before.clone(),
+                    None => std::env::var(name).ok().filter(|current| current != value),
+                };
+                (name.clone(), original)
+            })
+            .collect();
+        AppliedEnv {
+            config: env.clone(),
+            original_values,
+        }
+    }
+    fn sync(&mut self, wanted: &HashMap<String, String>) {
+        self.config = wanted.clone();
+    }
+    pub(crate) fn pane_env(&self) -> PaneEnv {
+        let mut pane_env: PaneEnv = self
+            .original_values
+            .iter()
+            .filter(|(name, _)| !self.config.contains_key(*name))
+            .map(|(name, original)| (name.clone(), original.clone()))
+            .collect();
+        for (name, value) in &self.config {
+            pane_env.insert(name.clone(), Some(value.clone()));
+        }
+        pane_env
+    }
+}
+
+#[cfg(test)]
+mod env_sync_tests {
+    use super::*;
+
+    fn wanted(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn config_env_changes_reach_new_panes_without_touching_the_server_environment() {
+        let name = "ZELLIJ_SESSION_12_ENV_PANE_TEST";
+        let inherited = "ZELLIJ_SESSION_12_ENV_PANE_INHERITED";
+        std::env::remove_var(name);
+        std::env::set_var(inherited, "from the shell");
+        let mut applied = AppliedEnv::default();
+        applied.sync(&wanted(&[(name, "first"), (inherited, "from the config")]));
+        assert_eq!(
+            applied.pane_env().get(inherited),
+            Some(&Some("from the config".to_owned()))
+        );
+        assert!(std::env::var(name).is_err());
+        assert_eq!(std::env::var(inherited).unwrap(), "from the shell");
+        assert_eq!(
+            applied.pane_env().get(name),
+            Some(&Some("first".to_owned()))
+        );
+        applied.sync(&wanted(&[(name, "second")]));
+        assert_eq!(
+            applied.pane_env().get(name),
+            Some(&Some("second".to_owned()))
+        );
+        applied.sync(&HashMap::new());
+        assert_eq!(applied.pane_env().get(name), None);
+        assert_eq!(applied.pane_env().get(inherited), None);
+        assert!(std::env::var(name).is_err());
+        assert_eq!(std::env::var(inherited).unwrap(), "from the shell");
+        std::env::remove_var(inherited);
+    }
+
+    #[test]
+    fn a_variable_set_at_startup_gets_its_earlier_value_in_new_panes_when_removed() {
+        let set_by_the_config = "ZELLIJ_SESSION_12_ENV_STARTUP_CONFIG";
+        let set_before = "ZELLIJ_SESSION_12_ENV_STARTUP_BEFORE";
+        let startup_env = wanted(&[
+            (set_by_the_config, "config value"),
+            (set_before, "config value"),
+        ]);
+        let mut values_before_config = HashMap::new();
+        values_before_config.insert(set_by_the_config.to_owned(), None);
+        values_before_config.insert(set_before.to_owned(), Some("earlier value".to_owned()));
+        let mut applied = AppliedEnv::at_startup_with(&startup_env, values_before_config);
+        assert_eq!(
+            applied.pane_env().get(set_before),
+            Some(&Some("config value".to_owned()))
+        );
+        applied.sync(&HashMap::new());
+        let pane_env = applied.pane_env();
+        assert_eq!(pane_env.get(set_by_the_config), Some(&None));
+        assert_eq!(
+            pane_env.get(set_before),
+            Some(&Some("earlier value".to_owned()))
+        );
+        applied.sync(&wanted(&[(set_before, "again")]));
+        assert_eq!(
+            applied.pane_env().get(set_before),
+            Some(&Some("again".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_startup_variable_without_an_earlier_value_is_unset_in_new_panes_when_removed() {
+        let name = "ZELLIJ_SESSION_12_ENV_STARTUP_NEW";
+        let mut applied = AppliedEnv::at_startup_with(&wanted(&[(name, "new")]), HashMap::new());
+        applied.sync(&HashMap::new());
+        assert_eq!(applied.pane_env().get(name), Some(&None));
+    }
+}
+
 #[cfg(test)]
 mod session_state_tests {
     use super::*;
@@ -1004,8 +1955,20 @@ mod session_state_tests {
             .get_actions_for_key_in_mode(&InputMode::Normal, &alt_f1)
             .is_some());
 
-        let config_changes = session_configuration.change_saved_config(config.clone());
+        let file_binding = r#"
+            keybinds {
+                normal {
+                    bind "Alt F2" { NewTab; }
+                }
+            }
+        "#;
+        let new_saved_config = Config::from_kdl(file_binding, Some(config.clone())).unwrap();
+        let (config_changes, dropped_changes) =
+            session_configuration.change_saved_config(new_saved_config);
         assert!(config_changes.iter().any(|(client_id, _)| *client_id == 1));
+        assert!(dropped_changes
+            .iter()
+            .all(|(_, dropped)| dropped == &vec![SettingKey::Keybinds]));
         let saved_keybinds = session_configuration.saved_config.keybinds.clone();
         assert!(Arc::ptr_eq(
             &keybinds_of(&session_configuration, 1),
@@ -1015,6 +1978,1199 @@ mod session_state_tests {
             &keybinds_of(&session_configuration, 2),
             &saved_keybinds
         ));
+    }
+
+    fn session_configuration_with_one_client(file_contents: &str) -> SessionConfiguration {
+        let saved_config =
+            Config::from_kdl(file_contents, Some(Config::from_default_assets().unwrap())).unwrap();
+        let mut session_configuration = SessionConfiguration::default();
+        session_configuration.set_saved_configuration(saved_config.clone());
+        session_configuration.set_client_runtime_configuration(1, saved_config);
+        session_configuration
+    }
+
+    fn current_value(
+        session_configuration: &SessionConfiguration,
+        key: SettingKey,
+    ) -> Option<String> {
+        config_settings::setting_value(&session_configuration.get_client_configuration(&1), key)
+    }
+
+    #[test]
+    fn reading_config_reports_saved_and_current_values_and_what_the_file_sets() {
+        let file_contents =
+            "mouse_mode false\nui {\n    pane_frames {\n        rounded_corners true\n    }\n}\n";
+        let config_dir = tempfile::tempdir().unwrap();
+        let config_file_path = config_dir.path().join("config.kdl");
+        std::fs::write(&config_file_path, file_contents).unwrap();
+        let mut session_configuration = session_configuration_with_one_client(file_contents);
+        session_configuration.reconfigure_runtime_config(&1, "simplified_ui true".to_owned());
+        session_configuration.reconfigure_runtime_config(&1, "mouse_mode true".to_owned());
+
+        let snapshot = session_configuration.config_snapshot(&1, Some(&config_file_path));
+
+        let simplified_ui = snapshot.setting(SettingKey::SimplifiedUi).unwrap();
+        assert_eq!(simplified_ui.saved_value, None);
+        assert_eq!(simplified_ui.current_value, Some("true".to_owned()));
+        assert!(!simplified_ui.set_in_file);
+        assert!(simplified_ui.is_unsaved());
+        let mouse_mode = snapshot.setting(SettingKey::MouseMode).unwrap();
+        assert_eq!(mouse_mode.saved_value, Some("false".to_owned()));
+        assert_eq!(mouse_mode.current_value, Some("true".to_owned()));
+        assert!(mouse_mode.set_in_file);
+        let rounded_corners = snapshot.setting(SettingKey::FrameRoundedCorners).unwrap();
+        assert!(rounded_corners.set_in_file);
+        assert!(!rounded_corners.is_unsaved());
+        assert!(!snapshot.setting(SettingKey::Keybinds).unwrap().is_unsaved());
+        assert_eq!(
+            snapshot.pending_restart_settings,
+            vec![SettingKey::MouseMode]
+        );
+        assert_eq!(snapshot.unsaved_count(), 2);
+        assert_eq!(
+            snapshot.config_file_path,
+            Some(config_file_path.display().to_string())
+        );
+        assert_eq!(
+            snapshot.backup_file_path,
+            Some(
+                config_dir
+                    .path()
+                    .join("config.kdl.bak")
+                    .display()
+                    .to_string()
+            )
+        );
+        assert!(snapshot
+            .blocks
+            .plugin_aliases
+            .iter()
+            .any(|alias| alias.name == "configuration"));
+        assert!(snapshot
+            .plugin_aliases
+            .iter()
+            .any(|alias| alias.starts_with("configuration")));
+    }
+
+    #[test]
+    fn reverting_one_setting_restores_its_saved_value_and_keeps_other_changes() {
+        let mut session_configuration = session_configuration_with_one_client("mouse_mode false");
+        session_configuration.reconfigure_runtime_config(&1, "mouse_mode true".to_owned());
+        session_configuration.reconfigure_runtime_config(&1, "simplified_ui true".to_owned());
+
+        let reverted = session_configuration.revert_runtime_config(&1, Some(SettingKey::MouseMode));
+
+        assert!(reverted.is_some());
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::MouseMode),
+            Some("false".to_owned())
+        );
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::SimplifiedUi),
+            Some("true".to_owned())
+        );
+        assert!(session_configuration
+            .revert_runtime_config(&1, Some(SettingKey::MouseMode))
+            .is_none());
+    }
+
+    #[test]
+    fn reverting_all_settings_restores_the_saved_config_including_unset_values() {
+        let mut session_configuration = session_configuration_with_one_client("mouse_mode false");
+        session_configuration.reconfigure_runtime_config(&1, "mouse_mode true".to_owned());
+        session_configuration.reconfigure_runtime_config(&1, "theme \"dracula\"".to_owned());
+        session_configuration.reconfigure_runtime_config(
+            &1,
+            "keybinds {\n normal {\n bind \"Alt F1\" { NewPane; }\n }\n}".to_owned(),
+        );
+
+        let reverted = session_configuration.revert_runtime_config(&1, None);
+
+        assert!(reverted.is_some());
+        let snapshot = session_configuration.config_snapshot(&1, None);
+        assert_eq!(snapshot.unsaved_count(), 0);
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::Theme),
+            None
+        );
+        assert_eq!(
+            session_configuration.get_client_keybinds(&1),
+            session_configuration.saved_config.keybinds.as_ref()
+        );
+    }
+
+    #[test]
+    fn unsetting_a_setting_removes_it_from_the_runtime_config() {
+        let mut session_configuration =
+            session_configuration_with_one_client("explicit_theme_hue \"dark\"");
+        let unset =
+            session_configuration.unset_runtime_config_setting(&1, SettingKey::ExplicitThemeHue);
+        assert!(unset.is_some());
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::ExplicitThemeHue),
+            None
+        );
+        let snapshot = session_configuration.config_snapshot(&1, None);
+        assert!(snapshot
+            .setting(SettingKey::ExplicitThemeHue)
+            .unwrap()
+            .is_unsaved());
+    }
+
+    #[test]
+    fn unsaved_changes_are_applied_again_on_top_of_a_changed_file() {
+        let mut session_configuration = session_configuration_with_one_client("mouse_mode false");
+        session_configuration.reconfigure_runtime_config(&1, "simplified_ui true".to_owned());
+        let new_saved_config = Config::from_kdl(
+            "mouse_mode false\nscroll_buffer_size 5000",
+            Some(Config::from_default_assets().unwrap()),
+        )
+        .unwrap();
+
+        let (config_changes, dropped_changes) =
+            session_configuration.change_saved_config(new_saved_config);
+
+        assert_eq!(config_changes.len(), 1);
+        assert!(dropped_changes.is_empty());
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::SimplifiedUi),
+            Some("true".to_owned())
+        );
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::ScrollBufferSize),
+            Some("5000".to_owned())
+        );
+        let snapshot = session_configuration.config_snapshot(&1, None);
+        assert_eq!(snapshot.unsaved_count(), 1);
+    }
+
+    #[test]
+    fn the_file_wins_when_it_changes_a_setting_with_an_unsaved_change_and_the_change_is_reported() {
+        let mut session_configuration = session_configuration_with_one_client("mouse_mode false");
+        session_configuration
+            .set_client_runtime_configuration(2, session_configuration.saved_config.clone());
+        session_configuration.reconfigure_runtime_config(&1, "mouse_mode true".to_owned());
+        session_configuration.reconfigure_runtime_config(&1, "simplified_ui true".to_owned());
+        session_configuration.reconfigure_runtime_config(&2, "pane_frames false".to_owned());
+        let new_saved_config = Config::from_kdl(
+            "mouse_mode false\nsimplified_ui true\npane_frames true",
+            Some(Config::from_default_assets().unwrap()),
+        )
+        .unwrap();
+
+        let (_config_changes, dropped_changes) =
+            session_configuration.change_saved_config(new_saved_config);
+
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::MouseMode),
+            Some("true".to_owned())
+        );
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::SimplifiedUi),
+            Some("true".to_owned())
+        );
+        assert_eq!(
+            config_settings::setting_value(
+                &session_configuration.get_client_configuration(&2),
+                SettingKey::PaneFrames
+            ),
+            Some("true".to_owned())
+        );
+        assert_eq!(dropped_changes, vec![(2, vec![SettingKey::PaneFrames])]);
+    }
+
+    fn locked_mode_action(
+        session_configuration: &SessionConfiguration,
+        key: &str,
+    ) -> Option<Vec<Action>> {
+        session_configuration
+            .get_client_keybinds(&1)
+            .get_actions_for_key_in_mode(&InputMode::Locked, &key.parse().unwrap())
+            .cloned()
+    }
+
+    #[test]
+    fn reconfiguring_with_a_new_preset_resolves_the_keybindings_again() {
+        let mut session_configuration = session_configuration_with_one_client(
+            "keybinds {\n normal {\n bind \"Alt F1\" { NewTab; }\n }\n}",
+        );
+        assert_eq!(locked_mode_action(&session_configuration, "Alt n"), None);
+
+        let (new_config, changed) = session_configuration
+            .reconfigure_runtime_config(&1, "keybinds preset=\"unlock-first\"".to_owned());
+
+        assert!(changed);
+        let new_config = new_config.unwrap();
+        assert_eq!(new_config.options.default_mode, Some(InputMode::Locked));
+        assert!(locked_mode_action(&session_configuration, "Alt n").is_some());
+        assert_eq!(
+            locked_mode_action(&session_configuration, "Ctrl g"),
+            Some(vec![Action::SwitchToMode {
+                input_mode: InputMode::Normal
+            }])
+        );
+        assert!(session_configuration
+            .get_client_keybinds(&1)
+            .get_actions_for_key_in_mode(&InputMode::Normal, &"Alt F1".parse().unwrap())
+            .is_some());
+        let snapshot = session_configuration.config_snapshot(&1, None);
+        assert!(snapshot.setting(SettingKey::Keybinds).unwrap().is_unsaved());
+        assert_eq!(snapshot.keybinds.preset.as_deref(), Some("unlock-first"));
+        assert_eq!(snapshot.keybinds.active.name, "unlock-first");
+
+        session_configuration
+            .reconfigure_runtime_config(&1, "keybinds unlock=\"Ctrl u\"".to_owned());
+        assert_eq!(locked_mode_action(&session_configuration, "Ctrl g"), None);
+        assert!(locked_mode_action(&session_configuration, "Ctrl u").is_some());
+    }
+
+    #[test]
+    fn a_change_in_the_keybinds_folder_is_picked_up() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let keybinds_dir = config_dir.path().join("keybinds");
+        std::fs::create_dir_all(&keybinds_dir).unwrap();
+        let preset_path = keybinds_dir.join("mine.kdl");
+        let preset_with_unlock_key = |unlock_key: &str| {
+            format!(
+                "keybinds {{\n locked {{\n bind \"{}\" {{ SwitchToMode \"Normal\"; }}\n }}\n}}",
+                unlock_key
+            )
+        };
+        let load = || {
+            let mut base = Config::from_default_assets().unwrap();
+            base.keybinds_layers.config_dir = Some(config_dir.path().to_path_buf());
+            Config::from_kdl("keybinds preset=\"mine\"", Some(base)).unwrap()
+        };
+        std::fs::write(&preset_path, preset_with_unlock_key("Ctrl y")).unwrap();
+        let mut session_configuration = SessionConfiguration::default();
+        session_configuration.set_saved_configuration(load());
+        session_configuration.set_client_runtime_configuration(1, load());
+        session_configuration.reconfigure_runtime_config(&1, "simplified_ui true".to_owned());
+        assert!(locked_mode_action(&session_configuration, "Ctrl y").is_some());
+
+        std::fs::write(&preset_path, preset_with_unlock_key("Ctrl t")).unwrap();
+        let (config_changes, dropped_changes) = session_configuration.change_saved_config(load());
+
+        assert_eq!(config_changes.len(), 1);
+        assert!(dropped_changes.is_empty());
+        assert_eq!(locked_mode_action(&session_configuration, "Ctrl y"), None);
+        assert!(locked_mode_action(&session_configuration, "Ctrl t").is_some());
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::SimplifiedUi),
+            Some("true".to_owned())
+        );
+    }
+
+    fn runtime_config_with_command_line_preset(saved_config: &Config, preset: &str) -> Config {
+        let mut runtime_config = saved_config.clone();
+        runtime_config.options.keybinds_preset = Some(preset.to_owned());
+        runtime_config
+    }
+
+    #[test]
+    fn a_client_attaching_with_a_command_line_preset_gets_it_alone_and_nothing_is_unsaved() {
+        let mut session_configuration = session_configuration_with_one_client("mouse_mode false");
+        let saved_config = session_configuration.saved_config.clone();
+        session_configuration.set_client_runtime_configuration(
+            2,
+            runtime_config_with_command_line_preset(&saved_config, "unlock-first"),
+        );
+
+        assert!(session_configuration
+            .get_client_keybinds(&2)
+            .get_actions_for_key_in_mode(&InputMode::Locked, &"Alt n".parse().unwrap())
+            .is_some());
+        assert_eq!(locked_mode_action(&session_configuration, "Alt n"), None);
+        assert_eq!(
+            session_configuration.get_client_default_input_mode(&2),
+            InputMode::Locked
+        );
+        assert_eq!(
+            session_configuration.get_client_default_input_mode(&1),
+            InputMode::Normal
+        );
+        let snapshot = session_configuration.config_snapshot(&2, None);
+        assert_eq!(snapshot.unsaved_count(), 0);
+        assert!(snapshot.keybinds.set_on_command_line);
+        assert_eq!(snapshot.keybinds.active.name, "unlock-first");
+    }
+
+    #[test]
+    fn a_command_line_preset_survives_a_config_file_reload() {
+        let mut session_configuration = SessionConfiguration::default();
+        let saved_config = Config::from_default_assets().unwrap();
+        session_configuration.set_saved_configuration(saved_config.clone());
+        session_configuration.set_client_runtime_configuration(
+            1,
+            runtime_config_with_command_line_preset(&saved_config, "unlock-first"),
+        );
+        let new_saved_config = Config::from_kdl(
+            "scroll_buffer_size 5000\nkeybinds {\n normal {\n bind \"Alt F2\" { NewTab; }\n }\n}",
+            Some(Config::from_default_assets().unwrap()),
+        )
+        .unwrap();
+
+        let (_, dropped_changes) = session_configuration.change_saved_config(new_saved_config);
+
+        assert!(dropped_changes.is_empty());
+        let config = session_configuration.get_client_configuration(&1);
+        assert_eq!(config.keybinds_layers.active.info.name, "unlock-first");
+        assert!(locked_mode_action(&session_configuration, "Alt n").is_some());
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::ScrollBufferSize),
+            Some("5000".to_owned())
+        );
+    }
+
+    #[test]
+    fn choosing_a_preset_replaces_the_command_line_preset_and_reverting_brings_it_back() {
+        let mut session_configuration = SessionConfiguration::default();
+        let saved_config = Config::from_default_assets().unwrap();
+        session_configuration.set_saved_configuration(saved_config.clone());
+        session_configuration.set_client_runtime_configuration(
+            1,
+            runtime_config_with_command_line_preset(&saved_config, "unlock-first"),
+        );
+
+        session_configuration
+            .reconfigure_runtime_config(&1, "keybinds preset=\"default\"".to_owned());
+
+        let config = session_configuration.get_client_configuration(&1);
+        assert_eq!(config.options.keybinds_preset, None);
+        assert_eq!(config.keybinds_layers.active.info.name, "default");
+        assert_eq!(locked_mode_action(&session_configuration, "Alt n"), None);
+        let snapshot = session_configuration.config_snapshot(&1, None);
+        assert!(!snapshot.keybinds.set_on_command_line);
+        assert!(snapshot.setting(SettingKey::Keybinds).unwrap().is_unsaved());
+
+        session_configuration.revert_runtime_config(&1, Some(SettingKey::Keybinds));
+
+        let config = session_configuration.get_client_configuration(&1);
+        assert_eq!(
+            config.options.keybinds_preset.as_deref(),
+            Some("unlock-first")
+        );
+        assert!(locked_mode_action(&session_configuration, "Alt n").is_some());
+        assert_eq!(
+            session_configuration
+                .config_snapshot(&1, None)
+                .unsaved_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_reconfigure_without_keybinds_attributes_keeps_the_command_line_preset() {
+        let mut session_configuration = SessionConfiguration::default();
+        let saved_config = Config::from_default_assets().unwrap();
+        session_configuration.set_saved_configuration(saved_config.clone());
+        session_configuration.set_client_runtime_configuration(
+            1,
+            runtime_config_with_command_line_preset(&saved_config, "unlock-first"),
+        );
+        session_configuration.reconfigure_runtime_config(&1, "simplified_ui true".to_owned());
+        session_configuration.reconfigure_runtime_config(
+            &1,
+            "keybinds {\n locked {\n bind \"Alt F1\" { NewTab; }\n }\n}".to_owned(),
+        );
+        assert!(locked_mode_action(&session_configuration, "Alt n").is_some());
+        assert!(locked_mode_action(&session_configuration, "Alt F1").is_some());
+    }
+
+    #[test]
+    fn unsaved_keybinding_changes_are_kept_when_only_a_preset_file_changes() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let keybinds_dir = config_dir.path().join("keybinds");
+        std::fs::create_dir_all(&keybinds_dir).unwrap();
+        let preset_path = keybinds_dir.join("mine.kdl");
+        let load = || {
+            let mut base = Config::from_default_assets().unwrap();
+            base.keybinds_layers.config_dir = Some(config_dir.path().to_path_buf());
+            Config::from_kdl("keybinds preset=\"mine\"", Some(base)).unwrap()
+        };
+        std::fs::write(
+            &preset_path,
+            "keybinds {\n locked {\n bind \"Ctrl y\" { SwitchToMode \"Normal\"; }\n }\n}",
+        )
+        .unwrap();
+        let mut session_configuration = SessionConfiguration::default();
+        session_configuration.set_saved_configuration(load());
+        session_configuration.set_client_runtime_configuration(1, load());
+        session_configuration.reconfigure_runtime_config(
+            &1,
+            "keybinds {\n locked {\n bind \"Alt F1\" { NewTab; }\n }\n}".to_owned(),
+        );
+
+        std::fs::write(
+            &preset_path,
+            "keybinds {\n locked {\n bind \"Ctrl t\" { SwitchToMode \"Normal\"; }\n }\n}",
+        )
+        .unwrap();
+        let (_, dropped_changes) = session_configuration.change_saved_config(load());
+
+        assert!(dropped_changes.is_empty());
+        assert!(locked_mode_action(&session_configuration, "Ctrl t").is_some());
+        assert!(locked_mode_action(&session_configuration, "Alt F1").is_some());
+    }
+
+    const FILE_WITH_COMMENTS: &str = "// mine\nmouse_mode false // off\n\ntheme \"nord\"\n";
+
+    fn config_file_with(contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let config_dir = tempfile::tempdir().unwrap();
+        let path = config_dir.path().join("config.kdl");
+        std::fs::write(&path, contents).unwrap();
+        (config_dir, path)
+    }
+
+    fn written_config(outcome: SaveOutcome) -> (Option<String>, Config) {
+        match outcome {
+            SaveOutcome::Written {
+                file_contents,
+                saved_config,
+                ..
+            } => (file_contents, saved_config),
+            other => panic!("the config was not written: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn saving_a_client_config_edits_only_the_changed_lines_of_the_file() {
+        let (_config_dir, path) = config_file_with(FILE_WITH_COMMENTS);
+        let mut session_configuration = session_configuration_with_one_client(FILE_WITH_COMMENTS);
+        session_configuration.reconfigure_runtime_config(&1, "mouse_mode true".to_owned());
+        session_configuration
+            .reconfigure_runtime_config(&1, "keybinds preset=\"unlock-first\"".to_owned());
+        let outcome = session_configuration.save_client_config_to_file(
+            &1,
+            &path,
+            Some(FILE_WITH_COMMENTS),
+            false,
+        );
+        let (file_contents, saved_config) = written_config(outcome);
+        let expected =
+            "// mine\nmouse_mode true // off\n\ntheme \"nord\"\nkeybinds preset=\"unlock-first\"\n";
+        assert_eq!(file_contents.as_deref(), Some(expected));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        assert_eq!(saved_config.options.mouse_mode, Some(true));
+        assert_eq!(
+            saved_config.keybinds_layers.user.preset.as_deref(),
+            Some("unlock-first")
+        );
+        let (_, dropped) = session_configuration.change_saved_config(saved_config);
+        assert!(dropped.is_empty());
+        assert_eq!(
+            session_configuration
+                .config_snapshot(&1, Some(&path))
+                .unsaved_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_reconfigure_that_writes_to_disk_saves_only_what_it_changed() {
+        let (_config_dir, path) = config_file_with(FILE_WITH_COMMENTS);
+        let mut session_configuration = session_configuration_with_one_client(FILE_WITH_COMMENTS);
+        session_configuration.reconfigure_runtime_config(&1, "pane_frames false".to_owned());
+        let before = session_configuration.get_client_configuration(&1);
+        let (after, _) = session_configuration
+            .reconfigure_runtime_config(&1, "show_startup_tips false".to_owned());
+        let outcome = session_configuration.save_change_to_file(
+            &path,
+            Some(FILE_WITH_COMMENTS),
+            &before,
+            &after.unwrap(),
+            true,
+        );
+        let (file_contents, saved_config) = written_config(outcome);
+        assert_eq!(
+            file_contents.as_deref(),
+            Some("// mine\nmouse_mode false // off\n\ntheme \"nord\"\nshow_startup_tips false\n")
+        );
+        assert_eq!(saved_config.options.show_startup_tips, Some(false));
+        assert_eq!(saved_config.options.pane_frames, None);
+    }
+
+    #[test]
+    fn a_reconfigure_that_writes_to_disk_saves_env_aliases_and_themes() {
+        let (_config_dir, path) = config_file_with(FILE_WITH_COMMENTS);
+        let mut session_configuration = session_configuration_with_one_client(FILE_WITH_COMMENTS);
+        let before = session_configuration.get_client_configuration(&1);
+        let (after, _) = session_configuration.reconfigure_runtime_config(
+            &1,
+            "env { EDITOR \"vim\"; }\nplugins { mine location=\"zellij:strider\"; }".to_owned(),
+        );
+        let outcome = session_configuration.save_change_to_file(
+            &path,
+            Some(FILE_WITH_COMMENTS),
+            &before,
+            &after.unwrap(),
+            true,
+        );
+        let (file_contents, saved_config) = written_config(outcome);
+        assert_eq!(
+            file_contents.as_deref(),
+            Some("// mine\nmouse_mode false // off\n\ntheme \"nord\"\nplugins {\n    mine location=\"zellij:strider\"\n}\nenv {\n    EDITOR \"vim\"\n}\n")
+        );
+        assert_eq!(
+            saved_config.env.inner().get("EDITOR"),
+            Some(&"vim".to_owned())
+        );
+        assert!(saved_config.plugins.aliases.contains_key("mine"));
+    }
+
+    #[test]
+    fn replacing_blocks_and_resetting_keys_change_only_the_runtime_config() {
+        use zellij_utils::data::BareKey;
+        let mut session_configuration =
+            session_configuration_with_one_client("env { A \"1\"; B \"2\"; }");
+        let (changed, did_change) =
+            session_configuration.replace_config_blocks(&1, "env {\n    B \"3\"\n}");
+        assert!(did_change);
+        let env = changed.unwrap().env;
+        assert_eq!(env.inner().get("A"), None);
+        assert_eq!(env.inner().get("B"), Some(&"3".to_owned()));
+        let snapshot = session_configuration.config_snapshot(&1, None);
+        assert!(snapshot.setting(SettingKey::Env).unwrap().is_unsaved());
+        assert_eq!(snapshot.blocks.env.len(), 1);
+        assert_eq!(snapshot.saved_blocks.env.len(), 2);
+
+        let alt_n = KeyWithModifier::new(BareKey::Char('n')).with_alt_modifier();
+        session_configuration.rebind_keys(&1, vec![], vec![(InputMode::Normal, alt_n.clone())]);
+        let unbound = session_configuration.get_client_configuration(&1);
+        assert!(unbound
+            .keybinds
+            .get_actions_for_key_in_mode(&InputMode::Normal, &alt_n)
+            .is_none());
+        let (_, did_change) =
+            session_configuration.reset_keys(&1, vec![(InputMode::Normal, alt_n.clone())]);
+        assert!(did_change);
+        let reset = session_configuration.get_client_configuration(&1);
+        assert!(reset
+            .keybinds
+            .get_actions_for_key_in_mode(&InputMode::Normal, &alt_n)
+            .is_some());
+        assert!(reset
+            .keybinds_layers
+            .user
+            .changes
+            .modes
+            .get(&InputMode::Normal)
+            .is_none());
+    }
+
+    #[test]
+    fn rebinding_keys_and_writing_to_disk_adds_only_those_keys() {
+        use zellij_utils::data::BareKey;
+        let file = "keybinds {\n    // locked keys\n    locked {\n        bind \"Alt n\" { NewTab; }\n    }\n}\n";
+        let (_config_dir, path) = config_file_with(file);
+        let mut session_configuration = session_configuration_with_one_client(file);
+        let before = session_configuration.get_client_configuration(&1);
+        let new_tab = before.keybinds_layers.user.changes.modes[&InputMode::Locked].bind
+            [&KeyWithModifier::new(BareKey::Char('n')).with_alt_modifier()]
+            .clone();
+        let (after, changed) = session_configuration.rebind_keys(
+            &1,
+            vec![(
+                InputMode::Locked,
+                KeyWithModifier::new(BareKey::Char('m')).with_alt_modifier(),
+                new_tab,
+            )],
+            vec![(
+                InputMode::Normal,
+                KeyWithModifier::new(BareKey::Char('g')).with_ctrl_modifier(),
+            )],
+        );
+        assert!(changed);
+        let outcome = session_configuration.save_change_to_file(
+            &path,
+            Some(file),
+            &before,
+            &after.unwrap(),
+            true,
+        );
+        let (file_contents, _) = written_config(outcome);
+        assert_eq!(
+            file_contents.as_deref(),
+            Some("keybinds {\n    // locked keys\n    locked {\n        bind \"Alt n\" { NewTab; }\n        bind \"Alt m\" { NewTab; }\n    }\n    normal {\n        unbind \"Ctrl g\"\n    }\n}\n")
+        );
+    }
+
+    #[test]
+    fn saving_after_an_outside_change_reports_it_and_writes_nothing() {
+        let (_config_dir, path) = config_file_with(FILE_WITH_COMMENTS);
+        let mut session_configuration = session_configuration_with_one_client(FILE_WITH_COMMENTS);
+        session_configuration.reconfigure_runtime_config(&1, "mouse_mode true".to_owned());
+        let outside = "// edited elsewhere\nmouse_mode false\n";
+        std::fs::write(&path, outside).unwrap();
+        let outcome = session_configuration.save_client_config_to_file(
+            &1,
+            &path,
+            Some(FILE_WITH_COMMENTS),
+            false,
+        );
+        assert_eq!(outcome, SaveOutcome::ChangedOutside);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), outside);
+        let outcome = session_configuration.save_client_config_to_file(
+            &1,
+            &path,
+            Some(FILE_WITH_COMMENTS),
+            true,
+        );
+        let (file_contents, _) = written_config(outcome);
+        assert_eq!(
+            file_contents.as_deref(),
+            Some("// edited elsewhere\nmouse_mode true\n")
+        );
+    }
+
+    fn test_session(
+        session_configuration: SessionConfiguration,
+        config_file_path: Option<PathBuf>,
+    ) -> (
+        Arc<RwLock<Option<SessionMetaData>>>,
+        zellij_utils::channels::Receiver<(ScreenInstruction, zellij_utils::errors::ErrorContext)>,
+        zellij_utils::channels::Receiver<(PluginInstruction, zellij_utils::errors::ErrorContext)>,
+    ) {
+        let (to_screen, screen_receiver): ChannelWithContext<ScreenInstruction> =
+            channels::unbounded();
+        let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> =
+            channels::unbounded();
+        let current_input_modes = session_configuration
+            .client_ids()
+            .into_iter()
+            .map(|client_id| {
+                (
+                    client_id,
+                    session_configuration.get_client_default_input_mode(&client_id),
+                )
+            })
+            .collect();
+        let contents_when_read = config_file_path
+            .as_deref()
+            .and_then(|path| read_config_file(path).ok().flatten());
+        let session = SessionMetaData {
+            senders: ThreadSenders {
+                to_screen: Some(SenderWithContext::new(to_screen)),
+                to_plugin: Some(SenderWithContext::new(to_plugin)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+            default_shell: None,
+            current_input_modes,
+            session_configuration,
+            key_passthrough_clients: HashMap::new(),
+            popup_clients: HashSet::new(),
+            modal_popup_clients: HashSet::new(),
+            terminal_command_submitted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            web_sharing: WebSharing::Off,
+            screen_thread: None,
+            pty_thread: None,
+            plugin_thread: None,
+            pty_writer_thread: None,
+            background_jobs_thread: None,
+            config_file_path,
+            config_file: ConfigFileState {
+                contents_when_read,
+                ..Default::default()
+            },
+            applied_env: AppliedEnv::default(),
+            sent_window_settings: HashMap::new(),
+            font_families: HashMap::new(),
+        };
+        (
+            Arc::new(RwLock::new(Some(session))),
+            screen_receiver,
+            plugin_receiver,
+        )
+    }
+
+    fn test_session_with_server(
+        session_configuration: SessionConfiguration,
+    ) -> (
+        Arc<RwLock<Option<SessionMetaData>>>,
+        zellij_utils::channels::Receiver<(ServerInstruction, zellij_utils::errors::ErrorContext)>,
+    ) {
+        let (session_data, _screen_receiver, _plugin_receiver) =
+            test_session(session_configuration, None);
+        let (to_server, server_receiver): ChannelWithContext<ServerInstruction> =
+            channels::unbounded();
+        if let Some(session) = session_data.write().unwrap().as_mut() {
+            session.senders.to_server = Some(SenderWithContext::new(to_server));
+        }
+        (session_data, server_receiver)
+    }
+
+    fn pushed_window_settings(
+        server_receiver: &zellij_utils::channels::Receiver<(
+            ServerInstruction,
+            zellij_utils::errors::ErrorContext,
+        )>,
+    ) -> Vec<(ClientId, WindowSettings)> {
+        server_receiver
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                ServerInstruction::WindowSettingsChanged(client_id, settings) => {
+                    Some((client_id, *settings))
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    const TWO_THEMES: &str = "themes {
+    first {
+        text_unselected {
+            base 1 1 1
+            background 1 1 1
+            emphasis_0 0 0 0
+            emphasis_1 0 0 0
+            emphasis_2 0 0 0
+            emphasis_3 0 0 0
+        }
+    }
+    second {
+        text_unselected {
+            base 2 2 2
+            background 2 2 2
+            emphasis_0 0 0 0
+            emphasis_1 0 0 0
+            emphasis_2 0 0 0
+            emphasis_3 0 0 0
+        }
+    }
+}
+theme \"first\"
+";
+
+    #[test]
+    fn window_settings_are_pushed_only_when_they_or_the_theme_change() {
+        let session_configuration = session_configuration_with_one_client(TWO_THEMES);
+        let (session_data, server_receiver) = test_session_with_server(session_configuration);
+
+        reconfigure_session(&session_data, 1, "window { blur true; }", false);
+        let pushed = pushed_window_settings(&server_receiver);
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0].0, 1);
+        assert_eq!(pushed[0].1.section.blur, Some(true));
+
+        reconfigure_session(&session_data, 1, "simplified_ui true", false);
+        assert!(
+            pushed_window_settings(&server_receiver).is_empty(),
+            "a change the window does not read was pushed to it"
+        );
+
+        reconfigure_session(&session_data, 1, "theme \"second\"", false);
+        let pushed = pushed_window_settings(&server_receiver);
+        assert_eq!(pushed.len(), 1, "a new theme did not reach the window");
+        assert_eq!(
+            pushed[0]
+                .1
+                .theme
+                .unwrap()
+                .palette
+                .text_unselected
+                .background,
+            zellij_utils::data::PaletteColor::Rgb((2, 2, 2))
+        );
+    }
+
+    #[test]
+    fn a_disconnected_window_is_forgotten_so_a_reconnect_is_told_again() {
+        let session_configuration = session_configuration_with_one_client(TWO_THEMES);
+        let (session_data, server_receiver) = test_session_with_server(session_configuration);
+        reconfigure_session(&session_data, 1, "window { blur true; }", false);
+        assert_eq!(pushed_window_settings(&server_receiver).len(), 1);
+        session_data
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .font_families
+            .insert(1, vec!["Mono".to_owned()]);
+
+        session_data
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .forget_window_client(1);
+
+        {
+            let session = session_data.read().unwrap();
+            let session = session.as_ref().unwrap();
+            assert!(session.sent_window_settings.is_empty());
+            assert!(session.font_families.is_empty());
+        }
+        reconfigure_session(&session_data, 1, "simplified_ui true", false);
+        assert_eq!(
+            pushed_window_settings(&server_receiver).len(),
+            1,
+            "a window that reconnected was not told its settings"
+        );
+    }
+
+    #[test]
+    fn the_settings_list_the_fonts_of_their_own_window_or_else_of_another() {
+        let mut session_configuration = session_configuration_with_one_client("");
+        session_configuration
+            .set_client_runtime_configuration(2, session_configuration.saved_config.clone());
+        session_configuration
+            .set_client_runtime_configuration(3, session_configuration.saved_config.clone());
+        let (session_data, _screen_receiver, _plugin_receiver) =
+            test_session(session_configuration, None);
+        let mut session = session_data.write().unwrap();
+        let session = session.as_mut().unwrap();
+        assert!(session.config_snapshot_for(1).font_families.is_empty());
+
+        session.font_families.insert(2, vec!["Zed Mono".to_owned()]);
+        session.font_families.insert(3, vec!["Iosevka".to_owned()]);
+        assert_eq!(
+            session.config_snapshot_for(3).font_families,
+            vec!["Iosevka".to_owned()]
+        );
+        assert_eq!(
+            session.config_snapshot_for(1).font_families,
+            vec!["Zed Mono".to_owned()],
+            "a terminal client did not borrow the list of an attached window"
+        );
+        session.font_families.insert(1, vec![]);
+        assert_eq!(
+            session.config_snapshot_for(1).font_families,
+            Vec::<String>::new(),
+            "a client that listed no fonts was given another client's"
+        );
+    }
+
+    fn reconfigure_session(
+        session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+        client_id: ClientId,
+        config: &str,
+        write_config_to_disk: bool,
+    ) {
+        let config_before = client_configuration(session_data, client_id);
+        let (new_config, changed) = session_data
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .session_configuration
+            .reconfigure_runtime_config(&client_id, config.to_owned());
+        apply_runtime_change(
+            config_before,
+            new_config,
+            write_config_to_disk,
+            changed,
+            session_data,
+            client_id,
+        );
+    }
+
+    #[test]
+    fn choosing_a_preset_with_another_base_mode_switches_the_client_to_it_right_away() {
+        let mut session_configuration = session_configuration_with_one_client("mouse_mode false");
+        session_configuration
+            .set_client_runtime_configuration(2, session_configuration.saved_config.clone());
+        let (session_data, screen_receiver, _plugin_receiver) =
+            test_session(session_configuration, None);
+
+        reconfigure_session(&session_data, 1, "keybinds preset=\"unlock-first\"", false);
+
+        assert_eq!(
+            session_data
+                .read()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .current_input_modes
+                .get(&1),
+            Some(&InputMode::Locked)
+        );
+        assert_eq!(
+            session_data
+                .read()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .current_input_modes
+                .get(&2),
+            Some(&InputMode::Normal)
+        );
+        let instructions: Vec<ScreenInstruction> = screen_receiver
+            .try_iter()
+            .map(|(instruction, _)| instruction)
+            .collect();
+        let reconfigured_at = instructions
+            .iter()
+            .position(|instruction| {
+                matches!(
+                    instruction,
+                    ScreenInstruction::Reconfigure { client_id: 1, .. }
+                )
+            })
+            .expect("the client was not reconfigured");
+        let mode_changed_at = instructions
+            .iter()
+            .position(|instruction| {
+                matches!(
+                    instruction,
+                    ScreenInstruction::ChangeMode(
+                        InputMode::Locked,
+                        Some(InputMode::Locked),
+                        1,
+                        None
+                    )
+                )
+            })
+            .expect("the client was not switched to its new base mode");
+        assert!(reconfigured_at < mode_changed_at);
+
+        reconfigure_session(&session_data, 1, "simplified_ui true", false);
+        assert!(!screen_receiver
+            .try_iter()
+            .any(|(instruction, _)| matches!(instruction, ScreenInstruction::ChangeMode(..))));
+    }
+
+    #[test]
+    fn an_overwrite_over_outside_changes_keeps_them_and_tells_every_client() {
+        let (_config_dir, path) = config_file_with(FILE_WITH_COMMENTS);
+        let mut session_configuration = session_configuration_with_one_client(FILE_WITH_COMMENTS);
+        session_configuration
+            .set_client_runtime_configuration(2, session_configuration.saved_config.clone());
+        let (session_data, _screen_receiver, plugin_receiver) =
+            test_session(session_configuration, Some(path.clone()));
+        std::fs::write(
+            &path,
+            "// edited elsewhere\nmouse_mode false\nscroll_buffer_size 5000\n",
+        )
+        .unwrap();
+
+        reconfigure_session(&session_data, 1, "simplified_ui true", true);
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("// edited elsewhere"));
+        assert!(written.contains("scroll_buffer_size 5000"));
+        assert!(written.contains("simplified_ui true"));
+        let session = session_data.read().unwrap();
+        let session = session.as_ref().unwrap();
+        let saved = session.session_configuration.saved_configuration();
+        assert_eq!(saved.options.scroll_buffer_size, Some(5000));
+        assert_eq!(saved.options.simplified_ui, Some(true));
+        assert_eq!(saved.options.theme, None);
+        assert_eq!(
+            session.config_file.contents_when_read.as_deref(),
+            Some(written.as_str())
+        );
+        assert_eq!(
+            config_settings::setting_value(
+                &session.session_configuration.get_client_configuration(&2),
+                SettingKey::ScrollBufferSize
+            ),
+            Some("5000".to_owned())
+        );
+        let notified: Vec<ClientId> = plugin_receiver
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                PluginInstruction::ConfigFileChangedSinceRead(client_id) => Some(client_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notified, vec![1, 2]);
+    }
+
+    #[test]
+    fn an_overwrite_without_outside_changes_tells_no_client() {
+        let (_config_dir, path) = config_file_with(FILE_WITH_COMMENTS);
+        let session_configuration = session_configuration_with_one_client(FILE_WITH_COMMENTS);
+        let (session_data, _screen_receiver, plugin_receiver) =
+            test_session(session_configuration, Some(path.clone()));
+
+        reconfigure_session(&session_data, 1, "simplified_ui true", true);
+
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("simplified_ui true"));
+        assert!(!plugin_receiver.try_iter().any(|(instruction, _)| matches!(
+            instruction,
+            PluginInstruction::ConfigFileChangedSinceRead(..)
+        )));
+    }
+
+    fn session_configuration_with_command_line_pane_frames(
+        file_contents: &str,
+    ) -> SessionConfiguration {
+        let mut session_configuration = session_configuration_with_one_client(file_contents);
+        let mut runtime_config = session_configuration.saved_config.clone();
+        runtime_config.options.pane_frames = Some(false);
+        session_configuration.set_client_runtime_configuration(1, runtime_config);
+        session_configuration
+    }
+
+    #[test]
+    fn a_command_line_option_is_not_written_when_another_setting_is_saved() {
+        let (_config_dir, path) = config_file_with(FILE_WITH_COMMENTS);
+        let mut session_configuration =
+            session_configuration_with_command_line_pane_frames(FILE_WITH_COMMENTS);
+        assert_eq!(
+            session_configuration
+                .config_snapshot(&1, Some(&path))
+                .unsaved_count(),
+            0
+        );
+        session_configuration.reconfigure_runtime_config(&1, "simplified_ui true".to_owned());
+
+        let outcome = session_configuration.save_client_config_to_file(
+            &1,
+            &path,
+            Some(FILE_WITH_COMMENTS),
+            false,
+        );
+
+        let (file_contents, saved_config) = written_config(outcome);
+        let file_contents = file_contents.unwrap();
+        assert!(file_contents.contains("simplified_ui true"));
+        assert!(!file_contents.contains("pane_frames"));
+        session_configuration.change_saved_config(saved_config);
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::PaneFrames),
+            Some("false".to_owned())
+        );
+        assert_eq!(
+            session_configuration
+                .config_snapshot(&1, Some(&path))
+                .unsaved_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_command_line_option_changed_in_the_settings_is_written() {
+        let (_config_dir, path) = config_file_with(FILE_WITH_COMMENTS);
+        let mut session_configuration =
+            session_configuration_with_command_line_pane_frames(FILE_WITH_COMMENTS);
+        session_configuration.reconfigure_runtime_config(&1, "pane_frames false".to_owned());
+
+        let outcome = session_configuration.save_client_config_to_file(
+            &1,
+            &path,
+            Some(FILE_WITH_COMMENTS),
+            false,
+        );
+
+        let (file_contents, _) = written_config(outcome);
+        assert!(file_contents.unwrap().contains("pane_frames false"));
+    }
+
+    #[test]
+    fn reverting_a_command_line_option_brings_back_its_command_line_value() {
+        let (_config_dir, path) = config_file_with(FILE_WITH_COMMENTS);
+        let mut session_configuration =
+            session_configuration_with_command_line_pane_frames(FILE_WITH_COMMENTS);
+        session_configuration.reconfigure_runtime_config(&1, "pane_frames true".to_owned());
+        assert!(session_configuration
+            .config_snapshot(&1, Some(&path))
+            .setting(SettingKey::PaneFrames)
+            .unwrap()
+            .is_unsaved());
+
+        session_configuration.revert_runtime_config(&1, Some(SettingKey::PaneFrames));
+
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::PaneFrames),
+            Some("false".to_owned())
+        );
+        let outcome = session_configuration.save_client_config_to_file(
+            &1,
+            &path,
+            Some(FILE_WITH_COMMENTS),
+            false,
+        );
+        let (file_contents, _) = written_config(outcome);
+        assert!(!file_contents.unwrap().contains("pane_frames"));
+    }
+
+    #[test]
+    fn layout_options_survive_a_config_file_reload_until_the_file_changes_them() {
+        let load = |file_contents: &str| {
+            Config::from_kdl(file_contents, Some(Config::from_default_assets().unwrap())).unwrap()
+        };
+        let config_without_layout = load("mouse_mode false");
+        let mut config_with_layout = config_without_layout.clone();
+        config_with_layout.options.pane_frames = Some(false);
+        let mut session_configuration = SessionConfiguration::default();
+        session_configuration.set_saved_configuration(config_with_layout.clone());
+        session_configuration.set_layout_settings(config_without_layout);
+        session_configuration.set_client_runtime_configuration(1, config_with_layout);
+
+        let (_, dropped_changes) = session_configuration
+            .change_saved_config(load("mouse_mode false\nscroll_buffer_size 5000"));
+
+        assert!(dropped_changes.is_empty());
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::PaneFrames),
+            Some("false".to_owned())
+        );
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::ScrollBufferSize),
+            Some("5000".to_owned())
+        );
+        assert_eq!(
+            session_configuration
+                .config_snapshot(&1, None)
+                .unsaved_count(),
+            0
+        );
+
+        session_configuration.change_saved_config(load("mouse_mode false\npane_frames true"));
+
+        assert_eq!(
+            current_value(&session_configuration, SettingKey::PaneFrames),
+            Some("true".to_owned())
+        );
+    }
+
+    fn next_preset_list(
+        receiver: &zellij_utils::channels::Receiver<(
+            PluginInstruction,
+            zellij_utils::errors::ErrorContext,
+        )>,
+    ) -> Vec<String> {
+        loop {
+            let (instruction, _) = receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("no preset list was sent");
+            if let PluginInstruction::KeybindPresetListUpdate(presets, _) = instruction {
+                return presets.into_iter().map(|preset| preset.name).collect();
+            }
+        }
+    }
+
+    #[test]
+    fn the_keybinds_folder_watcher_follows_a_new_folder() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::write(first.path().join("first.kdl"), "keybinds {\n}\n").unwrap();
+        std::fs::write(second.path().join("second.kdl"), "keybinds {\n}\n").unwrap();
+        let (sender, receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+        let to_plugin = SenderWithContext::new(sender);
+        let mut watcher = KeybindsDirWatcher::default();
+        assert!(watcher.needs_restart(&Some(first.path().to_path_buf())));
+        watcher.restart(Some(first.path().to_path_buf()), to_plugin.clone());
+        assert!(next_preset_list(&receiver).contains(&"first".to_owned()));
+        let first_stop = watcher.stop.clone().unwrap();
+        assert!(!watcher.needs_restart(&Some(first.path().to_path_buf())));
+        watcher.restart(Some(second.path().to_path_buf()), to_plugin.clone());
+        assert!(first_stop.load(Ordering::SeqCst));
+        assert_eq!(watcher.watched_dir(), Some(&second.path().to_path_buf()));
+        let presets = next_preset_list(&receiver);
+        assert!(presets.contains(&"second".to_owned()));
+        assert!(!presets.contains(&"first".to_owned()));
+        std::fs::write(second.path().join("third.kdl"), "keybinds {\n}\n").unwrap();
+        let mut presets = next_preset_list(&receiver);
+        while !presets.contains(&"third".to_owned()) {
+            presets = next_preset_list(&receiver);
+        }
+        assert!(!presets.contains(&"first".to_owned()));
+        watcher.stop();
     }
 
     #[test]
@@ -1136,12 +3292,215 @@ fn handle_new_connection(
     )
 }
 
+/// Proof that this server owns the session socket. Only the owner may delete the socket file.
+#[cfg(unix)]
+struct SocketOwnership {
+    lock: nix::fcntl::Flock<std::fs::File>,
+    lock_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl SocketOwnership {
+    // Binding a Unix socket requires deleting any leftover socket file first, so without a lock a
+    // second server could delete the socket of a live one. The OS releases the lock if we crash.
+    fn acquire(socket_path: &Path) -> std::io::Result<Self> {
+        use nix::fcntl::{Flock, FlockArg};
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let lock_path = Self::lock_path(socket_path)?;
+        loop {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .mode(0o600)
+                .open(&lock_path)?;
+            let lock = Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(
+                |(_, errno)| match errno {
+                    nix::errno::Errno::EWOULDBLOCK => std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        format!(
+                            "another server is already running on {}",
+                            socket_path.display()
+                        ),
+                    ),
+                    errno => std::io::Error::from(errno),
+                },
+            )?;
+            // An exiting owner may have deleted the lock file between our open and lock. Retry,
+            // otherwise two servers could each hold a lock on a different file.
+            let held = lock.metadata()?;
+            match std::fs::metadata(&lock_path) {
+                Ok(current) if current.dev() == held.dev() && current.ino() == held.ino() => {
+                    return Ok(SocketOwnership { lock, lock_path });
+                },
+                _ => continue,
+            }
+        }
+    }
+
+    // The lock file is deleted while the lock is still held, so no new server can lock it in
+    // between.
+    fn release(self) {
+        drop(std::fs::remove_file(&self.lock_path));
+        drop(self.lock);
+    }
+
+    fn lock_path(socket_path: &Path) -> std::io::Result<PathBuf> {
+        let file_name = socket_path.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "session socket path {} has no file name",
+                    socket_path.display()
+                ),
+            )
+        })?;
+        let mut lock_name = std::ffi::OsString::from(".");
+        lock_name.push(file_name);
+        lock_name.push(".lock");
+        Ok(socket_path.with_file_name(lock_name))
+    }
+}
+
+#[cfg(not(unix))]
+struct SocketOwnership;
+
+#[cfg(not(unix))]
+impl SocketOwnership {
+    // Windows refuses to create a second pipe with the same name and writes the marker file only
+    // after a successful bind, so no lock is needed.
+    fn acquire(_socket_path: &Path) -> std::io::Result<Self> {
+        Ok(SocketOwnership)
+    }
+
+    fn release(self) {}
+}
+
+/// The server's socket path. Only a server that bound the socket may remove it on exit: a server
+/// that lost a bind race to another server must leave the winner's socket alone.
+#[derive(Clone)]
+struct ServerSocket {
+    path: PathBuf,
+    ownership: Arc<std::sync::Mutex<Option<SocketOwnership>>>,
+}
+
+impl ServerSocket {
+    fn new(path: PathBuf) -> Self {
+        ServerSocket {
+            path,
+            ownership: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn bind(&self) -> std::io::Result<interprocess::local_socket::Listener> {
+        let ownership = SocketOwnership::acquire(&self.path)?;
+        drop(std::fs::remove_file(&self.path));
+        let listener = zellij_utils::consts::ipc_bind(&self.path)?;
+        *self.ownership.lock().unwrap() = Some(ownership);
+        Ok(listener)
+    }
+
+    fn remove_on_exit(&self) {
+        if let Some(ownership) = self.ownership.lock().unwrap().take() {
+            drop(std::fs::remove_file(&self.path));
+            ownership.release();
+        }
+    }
+}
+
+#[cfg(test)]
+mod server_socket_tests {
+    use super::*;
+
+    #[test]
+    fn a_server_that_never_bound_the_socket_leaves_the_winners_socket_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session");
+        let winner = ServerSocket::new(path.clone());
+        let _winner_listener = winner.bind().unwrap();
+
+        let loser = ServerSocket::new(path.clone());
+        loser.remove_on_exit();
+
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn the_server_that_bound_the_socket_removes_it_on_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session");
+        let server = ServerSocket::new(path.clone());
+        let _listener = server.bind().unwrap();
+        assert!(path.exists());
+
+        server.remove_on_exit();
+
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_server_cannot_take_over_the_socket_of_a_running_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session");
+        let winner = ServerSocket::new(path.clone());
+        let _winner_listener = winner.bind().unwrap();
+
+        let loser = ServerSocket::new(path.clone());
+        let error = loser.bind().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+        loser.remove_on_exit();
+
+        assert!(path.exists());
+        assert!(zellij_utils::consts::ipc_connect(&path).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_socket_file_without_a_running_server_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session");
+        std::fs::write(&path, "").unwrap();
+
+        let server = ServerSocket::new(path.clone());
+        let _listener = server.bind().unwrap();
+
+        assert!(zellij_utils::consts::ipc_connect(&path).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_server_can_bind_after_the_previous_one_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session");
+        let first = ServerSocket::new(path.clone());
+        let first_listener = first.bind().unwrap();
+        drop(first_listener);
+        first.remove_on_exit();
+        assert!(!SocketOwnership::lock_path(&path).unwrap().exists());
+
+        let second = ServerSocket::new(path.clone());
+        let _second_listener = second.bind().unwrap();
+
+        assert!(zellij_utils::consts::ipc_connect(&path).is_ok());
+    }
+}
+
 pub fn start_server_impl(
     mut os_input: Box<dyn ServerOsApi>,
     socket_path: PathBuf,
     install_panic_hook: bool,
 ) {
     envs::set_zellij("0".to_string());
+
+    // The socket/pipe filename is the stable session id, decoupled from the
+    // (renameable) display name. It is threaded into the per-session threads
+    // (screen / pty / background_jobs) so they key the session-info cache and
+    // the session index by id — NOT via a process-global, which would collide
+    // between the many sessions an integration test runs in one process.
+    let session_id = socket_path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     let (to_server, server_receiver): ChannelWithContext<ServerInstruction> = channels::bounded(50);
     let to_server = SenderWithContext::new(to_server);
@@ -1158,11 +3517,12 @@ pub fn start_server_impl(
         });
     }
 
+    let server_socket = ServerSocket::new(socket_path.clone());
+
     let _ = thread::Builder::new()
         .name("server_listener".to_string())
         .spawn({
             use interprocess::local_socket::prelude::*;
-            use zellij_utils::consts::ipc_bind;
             #[cfg(unix)]
             use zellij_utils::shared::set_permissions;
 
@@ -1171,9 +3531,21 @@ pub fn start_server_impl(
             let session_state = session_state.clone();
             let to_server = to_server.clone();
             let socket_path = socket_path.clone();
+            let server_socket = server_socket.clone();
             move || {
-                drop(std::fs::remove_file(&socket_path));
-                let listener = ipc_bind(&socket_path).unwrap();
+                let listener = match server_socket.bind() {
+                    Ok(listener) => listener,
+                    Err(err) => {
+                        let message = format!(
+                            "Failed to bind the session socket {}: {}",
+                            socket_path.display(),
+                            err
+                        );
+                        log::error!("{}", message);
+                        let _ = to_server.send(ServerInstruction::Error(message));
+                        return;
+                    },
+                };
                 // set the sticky bit to avoid the socket file being potentially cleaned up
                 // https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html states that for XDG_RUNTIME_DIR:
                 // "To ensure that your files are not removed, they should have their access time timestamp modified at least once every 6 hours of monotonic time or the 'sticky' bit should be set on the file. "
@@ -1230,11 +3602,31 @@ pub fn start_server_impl(
             }
         });
 
+    let mut last_attached_client_count = 0;
+    let mut delete_session_on_exit = false;
+    // The socket filename is the session id, not the (renameable) display name.
+    let mut own_session_name = zellij_utils::sessions::display_name_for_session_id(&session_id);
     loop {
+        let attached_client_count = session_state.read().unwrap().attached_client_count();
+        if attached_client_count != last_attached_client_count {
+            last_attached_client_count = attached_client_count;
+            if let Some(session_data) = session_data.read().unwrap().as_ref() {
+                let _ = session_data.senders.send_to_background_jobs(
+                    BackgroundJob::SessionSuggestions(SessionSuggestionsJob::ClientCountChanged(
+                        attached_client_count,
+                    )),
+                );
+            }
+        }
         let (instruction, mut err_ctx) = server_receiver.recv().unwrap();
         err_ctx.add_call(ContextType::IPCServer((&instruction).into()));
         match instruction {
             ServerInstruction::FirstClientConnected(cli_assets, is_web_client, client_id) => {
+                let is_resumed_session = match &cli_assets.layout {
+                    Some(LayoutInfo::File(path, _)) => Path::new(path)
+                        .starts_with(&*zellij_utils::consts::ZELLIJ_SESSION_INFO_CACHE_DIR),
+                    _ => false,
+                };
                 let host_terminal_env = cli_assets.host_terminal_env.clone();
                 let mut initial_panes = cli_assets.initial_panes.clone();
                 let (config, layout) = cli_assets.load_config_and_layout();
@@ -1271,7 +3663,7 @@ pub fn start_server_impl(
                     style: Style {
                         colors: config
                             .theme_config(runtime_config_options.theme.as_ref())
-                            .unwrap_or_else(|| default_palette().into()),
+                            .unwrap_or_else(Styling::default),
                         rounded_corners: config.ui.pane_frames.rounded_corners,
                         hide_session_name: config.ui.pane_frames.hide_session_name,
                         border_style: config.ui.pane_frames.resolved_border_style(),
@@ -1293,6 +3685,7 @@ pub fn start_server_impl(
                     config.clone(),
                     config.plugins.clone(),
                     client_id,
+                    session_id.clone(),
                 );
                 info!("FirstClientConnected: session initialized, spawning tabs");
                 let mut runtime_configuration = config.clone();
@@ -1300,10 +3693,21 @@ pub fn start_server_impl(
                 session
                     .session_configuration
                     .set_saved_configuration(config.clone());
+                if cli_assets.layout.is_some() {
+                    let mut cli_assets_without_layout = cli_assets.clone();
+                    cli_assets_without_layout.layout = None;
+                    let (config_without_layout, _) =
+                        cli_assets_without_layout.load_config_and_layout();
+                    session
+                        .session_configuration
+                        .set_layout_settings(config_without_layout);
+                }
                 session
                     .session_configuration
                     .set_client_runtime_configuration(client_id, runtime_configuration);
-                let default_input_mode = runtime_config_options.default_mode.unwrap_or_default();
+                let default_input_mode = session
+                    .session_configuration
+                    .get_client_default_input_mode(&client_id);
                 session
                     .current_input_modes
                     .insert(client_id, default_input_mode);
@@ -1423,6 +3827,26 @@ pub fn start_server_impl(
                 {
                     let rlock = session_data.read().unwrap();
                     let session_data = rlock.as_ref().unwrap();
+                    let _ = session_data.senders.send_to_background_jobs(
+                        BackgroundJob::SessionSuggestions(SessionSuggestionsJob::Configure {
+                            config: config.session_suggestions.clone(),
+                            session_card: runtime_config_options.session_card.unwrap_or(true),
+                            session_indicator: runtime_config_options
+                                .session_indicator
+                                .unwrap_or(true),
+                        }),
+                    );
+                    let _ = session_data.senders.send_to_background_jobs(
+                        BackgroundJob::SessionSuggestions(SessionSuggestionsJob::SessionStarted {
+                            name: own_session_name.clone(),
+                            cwd: cwd.clone().or_else(|| std::env::current_dir().ok()),
+                            card_for_client: if !is_resumed_session && !layout_is_welcome_screen {
+                                Some(client_id)
+                            } else {
+                                None
+                            },
+                        }),
+                    );
                     session_data
                         .senders
                         .send_to_plugin(PluginInstruction::AddClient(client_id))
@@ -1444,7 +3868,24 @@ pub fn start_server_impl(
                 client_id,
             ) => {
                 let mut rlock = session_data.write().unwrap();
-                let session_data = rlock.as_mut().unwrap();
+                let Some(session_data) = rlock.as_mut() else {
+                    drop(rlock);
+                    log::error!(
+                        "Client {} tried to attach before the session finished starting",
+                        client_id
+                    );
+                    let _ = os_input.send_to_client(
+                        client_id,
+                        ServerToClientMsg::Exit {
+                            exit_reason: ExitReason::Error(
+                                "The session is not ready yet, please try attaching again."
+                                    .to_owned(),
+                            ),
+                        },
+                    );
+                    remove_client!(client_id, os_input, session_state, session_data);
+                    continue;
+                };
                 let config = session_data.session_configuration.saved_config.clone();
                 let host_terminal_env = cli_assets.host_terminal_env.clone();
                 let runtime_config_options = match cli_assets.configuration_options {
@@ -1457,7 +3898,7 @@ pub fn start_server_impl(
                     style: Style {
                         colors: config
                             .theme_config(runtime_config_options.theme.as_ref())
-                            .unwrap_or_else(|| default_palette().into()),
+                            .unwrap_or_else(Styling::default),
                         rounded_corners: config.ui.pane_frames.rounded_corners,
                         hide_session_name: config.ui.pane_frames.hide_session_name,
                         border_style: config.ui.pane_frames.resolved_border_style(),
@@ -1474,7 +3915,9 @@ pub fn start_server_impl(
                     .session_configuration
                     .set_client_runtime_configuration(client_id, runtime_configuration);
 
-                let default_input_mode = config.options.default_mode.unwrap_or_default();
+                let default_input_mode = session_data
+                    .session_configuration
+                    .get_client_default_input_mode(&client_id);
                 session_data
                     .current_input_modes
                     .insert(client_id, default_input_mode);
@@ -1506,7 +3949,16 @@ pub fn start_server_impl(
                     .senders
                     .send_to_plugin(PluginInstruction::AddClient(client_id))
                     .unwrap();
-                let default_mode = config.options.default_mode.unwrap_or_default();
+                let client_configuration = session_data
+                    .session_configuration
+                    .get_client_configuration(&client_id);
+                if client_configuration.has_command_line_keybinds() {
+                    session_data.propagate_configuration_changes(
+                        vec![(client_id, client_configuration)],
+                        false,
+                    );
+                }
+                let default_mode = default_input_mode;
                 // ModeUpdate broadcast is handled by the screen thread via
                 // change_mode() -> update_input_modes()
                 session_data
@@ -1554,7 +4006,7 @@ pub fn start_server_impl(
                     );
                 }
             },
-            ServerInstruction::UnblockCliPipeInput(pipe_name) => {
+            ServerInstruction::UnblockCliPipeInput(pipe_name, exit_code) => {
                 let pipe = session_state.read().unwrap().get_pipe(&pipe_name);
                 match pipe {
                     Some(client_id) => {
@@ -1562,7 +4014,8 @@ pub fn start_server_impl(
                             client_id,
                             os_input,
                             ServerToClientMsg::UnblockCliPipeInput {
-                                pipe_name: pipe_name.clone()
+                                pipe_name: pipe_name.clone(),
+                                exit_code,
                             },
                             session_state,
                             session_data
@@ -1576,7 +4029,8 @@ pub fn start_server_impl(
                                 client_id,
                                 os_input,
                                 ServerToClientMsg::UnblockCliPipeInput {
-                                    pipe_name: pipe_name.clone()
+                                    pipe_name: pipe_name.clone(),
+                                    exit_code,
                                 },
                                 session_state,
                                 session_data
@@ -1794,17 +4248,13 @@ pub fn start_server_impl(
                 let client_ids = session_state.read().unwrap().client_ids();
                 // If `Some(_)`- unwrap it and forward it to the clients to render.
                 // If `None`- Send an exit instruction. This is the case when a user closes the last Tab/Pane.
-                if let Some(output) = &serialized_output {
-                    for (client_id, client_render_instruction) in output.iter() {
-                        send_to_client!(
-                            *client_id,
-                            os_input,
-                            ServerToClientMsg::Render {
-                                content: client_render_instruction.clone()
-                            },
-                            session_state,
-                            session_data
-                        );
+                if let Some(output) = serialized_output {
+                    for (client_id, client_render_instruction) in output {
+                        let msg = match client_render_instruction {
+                            RenderPayload::Ansi(content) => ServerToClientMsg::Render { content },
+                            RenderPayload::Frame(frame) => ServerToClientMsg::RenderFrame { frame },
+                        };
+                        send_to_client!(client_id, os_input, msg, session_state, session_data);
                     }
                 } else {
                     // Session is exiting - disconnect all regular clients
@@ -1885,6 +4335,46 @@ pub fn start_server_impl(
                     session_state,
                     session_data
                 );
+            },
+            ServerInstruction::SessionRenamed(new_name) => {
+                own_session_name = new_name;
+            },
+            ServerInstruction::TerminalCommandSubmitted => {
+                if let Some(session_data) = session_data.read().unwrap().as_ref() {
+                    session_data
+                        .terminal_command_submitted
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+            ServerInstruction::SwitchSessionAndCloseCurrent(
+                connect_to_session,
+                client_id,
+                completion_tx,
+            ) => {
+                let switching_away = connect_to_session.name.is_some()
+                    && connect_to_session.name.as_deref() != Some(own_session_name.as_str());
+                let command_was_run = session_data
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(|s| {
+                        s.terminal_command_submitted
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                    })
+                    .unwrap_or(true);
+                let other_clients_attached = session_state
+                    .read()
+                    .unwrap()
+                    .other_clients_are_attached(client_id);
+                let _ = to_server.send(ServerInstruction::SwitchSession(
+                    connect_to_session,
+                    client_id,
+                    completion_tx,
+                ));
+                if switching_away && !command_was_run && !other_clients_attached {
+                    delete_session_on_exit = true;
+                    let _ = to_server.send(ServerInstruction::KillSession);
+                }
             },
             ServerInstruction::SwitchSession(mut connect_to_session, client_id, completion_tx) => {
                 let current_session_name = envs::get_session_name();
@@ -1974,6 +4464,7 @@ pub fn start_server_impl(
                 config,
                 write_config_to_disk,
             } => {
+                let config_before = client_configuration(&session_data, client_id);
                 let (new_config, runtime_config_changed) = session_data
                     .write()
                     .unwrap()
@@ -1981,7 +4472,8 @@ pub fn start_server_impl(
                     .unwrap()
                     .session_configuration
                     .reconfigure_runtime_config(&client_id, config);
-                update_new_saved_config(
+                apply_runtime_change(
+                    config_before,
                     new_config,
                     write_config_to_disk,
                     runtime_config_changed,
@@ -1990,20 +4482,7 @@ pub fn start_server_impl(
                 );
             },
             ServerInstruction::ConfigWrittenToDisk(new_config) => {
-                let changes = session_data
-                    .write()
-                    .unwrap()
-                    .as_mut()
-                    .unwrap()
-                    .session_configuration
-                    .change_saved_config(new_config);
-                let config_was_written_to_disk = true;
-                session_data
-                    .write()
-                    .unwrap()
-                    .as_mut()
-                    .unwrap()
-                    .propagate_configuration_changes(changes, config_was_written_to_disk);
+                apply_new_saved_config(new_config, &session_data);
                 let client_ids = session_state.read().unwrap().client_ids();
                 for client_id in client_ids {
                     send_to_client!(
@@ -2015,15 +4494,188 @@ pub fn start_server_impl(
                     );
                 }
             },
+            ServerInstruction::FontFamilies(client_id, families) => {
+                if let Some(session_data) = session_data.write().unwrap().as_mut() {
+                    session_data.font_families.insert(client_id, families);
+                }
+            },
+            ServerInstruction::WindowSettingsChanged(client_id, settings) => {
+                send_to_client!(
+                    client_id,
+                    os_input,
+                    ServerToClientMsg::WindowSettingsChanged { settings },
+                    session_state,
+                    session_data
+                );
+            },
+            ServerInstruction::HostTerminalThemeModeChanged(client_id, mode) => {
+                let client_ids = match client_id {
+                    Some(client_id) => vec![client_id],
+                    None => session_state.read().unwrap().client_ids(),
+                };
+                for client_id in client_ids {
+                    send_to_client!(
+                        client_id,
+                        os_input,
+                        ServerToClientMsg::HostTerminalThemeChanged { mode },
+                        session_state,
+                        session_data
+                    );
+                }
+            },
             ServerInstruction::FailedToWriteConfigToDisk(_client_id, file_path) => {
-                session_data
-                    .write()
+                send_to_plugin_thread(
+                    &session_data,
+                    PluginInstruction::FailedToWriteConfigToDisk { file_path },
+                );
+            },
+            ServerInstruction::ReadConfig {
+                client_id,
+                response_channel,
+            } => {
+                let snapshot = session_data
+                    .read()
                     .unwrap()
                     .as_ref()
+                    .map(|session_data| session_data.config_snapshot_for(client_id));
+                if let Some(snapshot) = snapshot {
+                    let _ = response_channel.send(snapshot);
+                }
+            },
+            ServerInstruction::RevertConfig { client_id, key } => {
+                let reverted_config = session_data
+                    .write()
                     .unwrap()
-                    .senders
-                    .send_to_plugin(PluginInstruction::FailedToWriteConfigToDisk { file_path })
-                    .unwrap();
+                    .as_mut()
+                    .unwrap()
+                    .session_configuration
+                    .revert_runtime_config(&client_id, key);
+                propagate_runtime_config_change(reverted_config, &session_data, client_id);
+            },
+            ServerInstruction::UnsetConfigSetting { client_id, key } => {
+                let unset_config = session_data
+                    .write()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .session_configuration
+                    .unset_runtime_config_setting(&client_id, key);
+                propagate_runtime_config_change(unset_config, &session_data, client_id);
+            },
+            ServerInstruction::SaveConfig { client_id } => {
+                save_client_config_to_disk(&session_data, client_id, false);
+            },
+            ServerInstruction::OverwriteConfigFile { client_id } => {
+                save_client_config_to_disk(&session_data, client_id, true);
+            },
+            ServerInstruction::ReloadConfigFile { client_id: _ } => {
+                reload_config_file(&session_data);
+            },
+            ServerInstruction::SaveKeybindsAsPreset {
+                client_id,
+                new_name,
+                response_channel,
+            } => {
+                let result = session_data
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(|session_data| {
+                        session_data.session_configuration.save_keybinds_as_preset(
+                            &client_id,
+                            session_data.config_file_path.as_ref(),
+                            &new_name,
+                        )
+                    })
+                    .unwrap_or_else(|| Err("No active session".to_owned()));
+                let _ = response_channel.send(result);
+            },
+            ServerInstruction::CopyKeybindPreset {
+                client_id,
+                preset,
+                new_name,
+                response_channel,
+            } => {
+                let result = session_data
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(|session_data| {
+                        session_data
+                            .session_configuration
+                            .copy_keybind_preset(&client_id, &preset, &new_name)
+                    })
+                    .unwrap_or_else(|| Err("No active session".to_owned()));
+                let _ = response_channel.send(result);
+            },
+            ServerInstruction::WriteThemeFile {
+                client_id,
+                name,
+                copy_from,
+                colours,
+                response_channel,
+            } => {
+                let written = session_data
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(|session_data| {
+                        session_data.session_configuration.write_theme_file(
+                            &client_id,
+                            &name,
+                            copy_from.as_deref(),
+                            &colours,
+                        )
+                    })
+                    .unwrap_or_else(|| Err("No active session".to_owned()));
+                let result = match written {
+                    Ok((path, theme)) => {
+                        let new_saved_config =
+                            session_data.read().unwrap().as_ref().map(|session_data| {
+                                session_data
+                                    .session_configuration
+                                    .saved_config_with_theme(&name, Some(theme))
+                            });
+                        if let Some(new_saved_config) = new_saved_config {
+                            apply_new_saved_config(new_saved_config, &session_data);
+                        }
+                        Ok(path.display().to_string())
+                    },
+                    Err(error) => Err(error),
+                };
+                let _ = response_channel.send(result);
+            },
+            ServerInstruction::DeleteThemeFile {
+                client_id,
+                name,
+                response_channel,
+            } => {
+                let deleted = session_data
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(|session_data| {
+                        session_data
+                            .session_configuration
+                            .delete_theme_file(&client_id, &name)
+                    })
+                    .unwrap_or_else(|| Err("No active session".to_owned()));
+                let result = match deleted {
+                    Ok((path, replacement)) => {
+                        let new_saved_config =
+                            session_data.read().unwrap().as_ref().map(|session_data| {
+                                session_data
+                                    .session_configuration
+                                    .saved_config_with_theme(&name, replacement)
+                            });
+                        if let Some(new_saved_config) = new_saved_config {
+                            apply_new_saved_config(new_saved_config, &session_data);
+                        }
+                        Ok(path.display().to_string())
+                    },
+                    Err(error) => Err(error),
+                };
+                let _ = response_channel.send(result);
             },
             ServerInstruction::RebindKeys {
                 client_id,
@@ -2031,6 +4683,7 @@ pub fn start_server_impl(
                 keys_to_unbind,
                 write_config_to_disk,
             } => {
+                let config_before = client_configuration(&session_data, client_id);
                 let (new_config, runtime_config_changed) = session_data
                     .write()
                     .unwrap()
@@ -2038,8 +4691,70 @@ pub fn start_server_impl(
                     .unwrap()
                     .session_configuration
                     .rebind_keys(&client_id, keys_to_rebind, keys_to_unbind);
-
-                update_new_saved_config(
+                apply_runtime_change(
+                    config_before,
+                    new_config,
+                    write_config_to_disk,
+                    runtime_config_changed,
+                    &session_data,
+                    client_id,
+                );
+            },
+            ServerInstruction::ReplaceConfigBlocks { client_id, config } => {
+                let config_before = client_configuration(&session_data, client_id);
+                let (new_config, runtime_config_changed) = session_data
+                    .write()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .session_configuration
+                    .replace_config_blocks(&client_id, &config);
+                apply_runtime_change(
+                    config_before,
+                    new_config,
+                    false,
+                    runtime_config_changed,
+                    &session_data,
+                    client_id,
+                );
+            },
+            ServerInstruction::ResetMousebinds {
+                client_id,
+                triggers,
+                write_config_to_disk,
+            } => {
+                let config_before = client_configuration(&session_data, client_id);
+                let (new_config, runtime_config_changed) = session_data
+                    .write()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .session_configuration
+                    .reset_mousebinds(&client_id, triggers);
+                apply_runtime_change(
+                    config_before,
+                    new_config,
+                    write_config_to_disk,
+                    runtime_config_changed,
+                    &session_data,
+                    client_id,
+                );
+            },
+            ServerInstruction::ResetKeys {
+                client_id,
+                keys,
+                write_config_to_disk,
+            } => {
+                let config_before = client_configuration(&session_data, client_id);
+                let (new_config, runtime_config_changed) = session_data
+                    .write()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .session_configuration
+                    .reset_keys(&client_id, keys);
+                apply_runtime_change(
+                    config_before,
                     new_config,
                     write_config_to_disk,
                     runtime_config_changed,
@@ -2227,6 +4942,21 @@ pub fn start_server_impl(
                     }
                 }
             },
+            ServerInstruction::PopupStateChanged(client_id, is_open, takes_all_keys) => {
+                let mut session_data = session_data.write().unwrap();
+                if let Some(session_data) = session_data.as_mut() {
+                    if is_open {
+                        session_data.popup_clients.insert(client_id);
+                    } else {
+                        session_data.popup_clients.remove(&client_id);
+                    }
+                    if is_open && takes_all_keys {
+                        session_data.modal_popup_clients.insert(client_id);
+                    } else {
+                        session_data.modal_popup_clients.remove(&client_id);
+                    }
+                }
+            },
             ServerInstruction::KeyPassthroughChanged(
                 client_id,
                 _old_pane_id,
@@ -2304,7 +5034,23 @@ pub fn start_server_impl(
     // Drop cached session data before exit.
     *session_data.write().unwrap() = None;
 
-    drop(std::fs::remove_file(&socket_path));
+    server_socket.remove_on_exit();
+    if delete_session_on_exit {
+        delete_unused_session_after_exit(&session_id, &own_session_name);
+    }
+}
+
+// The session-info cache folder is named by session id; the session index row by name.
+fn delete_unused_session_after_exit(session_id: &str, session_name: &str) {
+    if session_id.is_empty() {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(zellij_utils::consts::session_info_folder_for_session(
+        session_id,
+    ));
+    if let Ok(index) = zellij_utils::session_index::SessionIndex::open_default() {
+        let _ = index.delete(session_name);
+    }
 }
 
 fn init_session(
@@ -2317,8 +5063,12 @@ fn init_session(
     mut config: Config,
     plugin_aliases: PluginAliases,
     client_id: ClientId,
+    session_id: String,
 ) -> SessionMetaData {
     config.options = config.options.merge(*config_options.clone());
+    if config.has_command_line_keybinds() {
+        config.resolve_keybinds();
+    }
 
     let _ = SCROLL_BUFFER_SIZE.set(
         config_options
@@ -2327,6 +5077,9 @@ fn init_session(
     );
 
     let (to_screen, screen_receiver): ChannelWithContext<ScreenInstruction> = channels::unbounded();
+    let (to_screen_priority, screen_priority_receiver): ChannelWithContext<ScreenInstruction> =
+        channels::unbounded();
+    let to_screen_priority = SenderWithContext::new(to_screen_priority);
     let to_screen = SenderWithContext::new(to_screen);
 
     let (to_screen_bounded, bounded_screen_receiver): ChannelWithContext<ScreenInstruction> =
@@ -2358,6 +5111,9 @@ fn init_session(
     let has_certificate =
         config_options.web_server_cert.is_some() && config_options.web_server_key.is_some();
     let enforce_https_for_localhost = config_options.enforce_https_for_localhost.unwrap_or(false);
+    let dangerously_allow_web_serving_without_a_certificate = config_options
+        .dangerously_allow_web_serving_without_a_certificate
+        .unwrap_or(false);
 
     let default_shell = config_options.default_shell.clone().map(|command| {
         TerminalAction::RunCommand(RunCommand {
@@ -2371,8 +5127,9 @@ fn init_session(
         .clone()
         .unwrap_or_else(|| get_default_shell());
 
-    let default_mode = config_options.default_mode.unwrap_or_default();
+    let default_mode = config.options.default_mode.unwrap_or_default();
     let default_keybinds: SharedKeybinds = Arc::new(config.keybinds.to_keybinds_vec());
+    let applied_env = AppliedEnv::at_startup(config.env.inner());
 
     let pty_thread = thread::Builder::new()
         .name("pty".to_string())
@@ -2392,9 +5149,11 @@ fn init_session(
                 cli_assets.is_debug,
                 config_options.scrollback_editor.clone(),
                 config_options.post_command_discovery_hook.clone(),
+                applied_env.pane_env(),
             );
 
-            move || pty_thread_main(pty, layout.clone()).fatal()
+            let session_id = session_id.clone();
+            move || pty_thread_main(pty, layout.clone(), session_id).fatal()
         })
         .unwrap();
 
@@ -2411,7 +5170,8 @@ fn init_session(
                 Some(&to_pty_writer),
                 Some(&to_background_jobs),
                 Some(os_input.clone()),
-            );
+            )
+            .with_priority(screen_priority_receiver, &to_screen_priority);
             let max_panes = cli_assets.max_panes;
 
             let client_attributes_clone = client_attributes.clone();
@@ -2419,6 +5179,7 @@ fn init_session(
             let layout = layout.clone();
             let config = config.clone();
             let default_keybinds = default_keybinds.clone();
+            let session_id = session_id.clone();
             move || {
                 screen_thread_main(
                     screen_bus,
@@ -2428,6 +5189,7 @@ fn init_session(
                     debug,
                     layout,
                     default_keybinds,
+                    session_id,
                 )
                 .fatal();
             }
@@ -2521,18 +5283,22 @@ fn init_session(
                 web_server_port,
                 has_certificate,
                 enforce_https_for_localhost,
+                dangerously_allow_web_serving_without_a_certificate,
             );
+            let session_id = session_id.clone();
             move || {
                 background_jobs_main(
                     background_jobs_bus,
                     serialization_interval,
                     disable_session_metadata,
                     web_server_base_url,
+                    session_id,
                 )
                 .fatal()
             }
         })
         .unwrap();
+    let mut keybinds_dir_watcher = None;
     if let Some(config_file_path) = cli_assets.config_file_path.clone() {
         let layout_dir = config_options
             .layout_dir
@@ -2556,11 +5322,26 @@ fn init_session(
                 to_screen.clone(),
             );
         }
+        let mut watcher = KeybindsDirWatcher::default();
+        watcher.restart(config.keybinds_dir(), to_plugin.clone());
+        keybinds_dir_watcher = Some(watcher);
     }
+    let active_preset_files: Vec<PathBuf> = config
+        .active_keybind_preset_file()
+        .filter(|_| config.keybinds_layers.active.info.source == KeybindPresetSource::File)
+        .into_iter()
+        .collect();
+    let (keybind_presets, keybind_preset_errors) =
+        list_keybind_presets(config.keybinds_dir().as_deref(), &active_preset_files);
+    let _ = to_plugin.send(PluginInstruction::KeybindPresetListUpdate(
+        keybind_presets,
+        keybind_preset_errors,
+    ));
 
     SessionMetaData {
         senders: ThreadSenders {
             to_screen: Some(to_screen),
+            to_screen_priority: Some(to_screen_priority),
             to_pty: Some(to_pty),
             to_plugin: Some(to_plugin),
             to_pty_writer: Some(to_pty_writer),
@@ -2581,6 +5362,20 @@ fn init_session(
         #[cfg(not(feature = "web_server_capability"))]
         web_sharing: WebSharing::Disabled,
         key_passthrough_clients: HashMap::new(),
+        popup_clients: HashSet::new(),
+        modal_popup_clients: HashSet::new(),
+        terminal_command_submitted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        applied_env,
+        sent_window_settings: HashMap::new(),
+        font_families: HashMap::new(),
+        config_file: ConfigFileState {
+            contents_when_read: cli_assets
+                .config_file_path
+                .as_deref()
+                .and_then(|path| read_config_file(path).ok().flatten()),
+            config_dir: cli_assets.config_dir.clone(),
+            keybinds_dir_watcher,
+        },
         config_file_path: cli_assets.config_file_path,
     }
 }
@@ -2678,6 +5473,34 @@ fn report_changes_in_config_file(
     });
 }
 
+fn report_changes_in_keybinds_dir(
+    keybinds_dir: PathBuf,
+    to_plugin: SenderWithContext<PluginInstruction>,
+) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let watcher_stop = stop.clone();
+    std::thread::spawn(move || {
+        let rt = crate::global_async_runtime::get_tokio_runtime();
+        rt.block_on(async move {
+            watch_keybinds_dir_changes(
+                keybinds_dir,
+                watcher_stop,
+                move |presets, preset_errors| {
+                    let to_plugin = to_plugin.clone();
+                    async move {
+                        let _ = to_plugin.send(PluginInstruction::KeybindPresetListUpdate(
+                            presets,
+                            preset_errors,
+                        ));
+                    }
+                },
+            )
+            .await;
+        });
+    });
+    stop
+}
+
 fn report_changes_in_layout_dir(
     layout_dir: PathBuf,
     default_layout_name: Option<String>,
@@ -2710,88 +5533,245 @@ fn report_changes_in_layout_dir(
     });
 }
 
-fn update_new_saved_config(
+fn apply_new_saved_config(
+    new_saved_config: Config,
+    session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+) -> bool {
+    let (changes, dropped_changes) = session_data
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .session_configuration
+        .change_saved_config(new_saved_config);
+    let propagated_changes = !changes.is_empty();
+    let config_was_written_to_disk = true;
+    let mut session_data = session_data.write().unwrap();
+    let session_data = session_data.as_mut().unwrap();
+    session_data.propagate_configuration_changes(changes, config_was_written_to_disk);
+    for (client_id, dropped_settings) in dropped_changes {
+        let _ = session_data
+            .senders
+            .send_to_plugin(PluginInstruction::ConfigChangesDropped(
+                client_id,
+                dropped_settings,
+            ));
+    }
+    propagated_changes
+}
+
+fn propagate_runtime_config_change(
+    new_config: Option<Config>,
+    session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+    client_id: ClientId,
+) {
+    if let Some(new_config) = new_config {
+        let config_was_written_to_disk = false;
+        session_data
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .propagate_configuration_changes(
+                vec![(client_id, new_config)],
+                config_was_written_to_disk,
+            );
+    }
+}
+
+fn send_to_plugin_thread(
+    session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+    instruction: PluginInstruction,
+) {
+    if let Some(session_data) = session_data.read().unwrap().as_ref() {
+        let _ = session_data.senders.send_to_plugin(instruction);
+    }
+}
+
+fn client_configuration(
+    session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+    client_id: ClientId,
+) -> Config {
+    session_data
+        .read()
+        .unwrap()
+        .as_ref()
+        .map(|session_data| {
+            session_data
+                .session_configuration
+                .get_client_configuration(&client_id)
+        })
+        .unwrap_or_default()
+}
+
+fn apply_runtime_change(
+    config_before: Config,
     new_config: Option<Config>,
     write_config_to_disk: bool,
     runtime_config_changed: bool,
     session_data: &Arc<RwLock<Option<SessionMetaData>>>,
     client_id: ClientId,
 ) {
-    if let Some(new_config) = new_config {
-        if write_config_to_disk {
-            let clear_defaults = true;
-            let config_file_path = session_data
-                .read()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .config_file_path
-                .clone();
+    let Some(new_config) = new_config else {
+        return;
+    };
+    if runtime_config_changed {
+        propagate_runtime_config_change(Some(new_config.clone()), session_data, client_id);
+    }
+    if write_config_to_disk {
+        let overwrite = true;
+        write_config_change(
+            session_data,
+            client_id,
+            Some(config_before),
+            new_config,
+            overwrite,
+        );
+    }
+}
 
-            let Some(config_file_path) = config_file_path.as_ref() else {
-                log::error!("No config file path found.");
-                session_data
-                    .write()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .senders
-                    .send_to_plugin(PluginInstruction::FailedToWriteConfigToDisk {
-                        file_path: None,
-                    })
-                    .unwrap();
-                return;
-            };
-            match Config::write_config_to_disk(
-                new_config.to_string(clear_defaults),
-                &config_file_path,
-            ) {
-                Ok(written_config) => {
-                    let changes = session_data
-                        .write()
-                        .unwrap()
-                        .as_mut()
-                        .unwrap()
-                        .session_configuration
-                        .change_saved_config(written_config);
-                    let config_was_written_to_disk = true;
-                    session_data
-                        .write()
-                        .unwrap()
-                        .as_mut()
-                        .unwrap()
-                        .propagate_configuration_changes(changes, config_was_written_to_disk);
-                },
-                Err(e) => {
-                    let error_path = e
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(String::new);
-                    log::error!("Failed to write config to disk: {}", error_path);
-                    session_data
-                        .write()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .senders
-                        .send_to_plugin(PluginInstruction::FailedToWriteConfigToDisk {
-                            file_path: e,
-                        })
-                        .unwrap();
-                },
-            }
-        } else if runtime_config_changed {
-            let config_was_written_to_disk = false;
+fn save_client_config_to_disk(
+    session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+    client_id: ClientId,
+    overwrite: bool,
+) {
+    let client_config = session_data
+        .read()
+        .unwrap()
+        .as_ref()
+        .map(|session_data| {
             session_data
-                .write()
-                .unwrap()
-                .as_mut()
-                .unwrap()
-                .propagate_configuration_changes(
-                    vec![(client_id, new_config)],
-                    config_was_written_to_disk,
-                );
+                .session_configuration
+                .client_config_to_save(&client_id)
+        })
+        .unwrap_or_default();
+    write_config_change(session_data, client_id, None, client_config, overwrite);
+}
+
+fn write_config_change(
+    session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+    client_id: ClientId,
+    base: Option<Config>,
+    target: Config,
+    overwrite: bool,
+) {
+    let outcome = {
+        let session_data = session_data.read().unwrap();
+        let Some(session_data) = session_data.as_ref() else {
+            return;
+        };
+        match session_data.config_file_path.as_ref() {
+            Some(config_file_path) => {
+                let session_configuration = &session_data.session_configuration;
+                let base =
+                    base.unwrap_or_else(|| session_configuration.saved_configuration().clone());
+                session_configuration.save_change_to_file(
+                    config_file_path,
+                    session_data.config_file.contents_when_read.as_deref(),
+                    &base,
+                    &target,
+                    overwrite,
+                )
+            },
+            None => {
+                log::error!("No config file path found.");
+                SaveOutcome::Failed(None)
+            },
         }
+    };
+    match outcome {
+        SaveOutcome::Written {
+            file_contents,
+            saved_config,
+            changed_outside,
+        } => {
+            let saved_config = if changed_outside {
+                load_saved_config_from_disk(session_data)
+                    .map(|(_, reloaded)| reloaded)
+                    .unwrap_or(saved_config)
+            } else {
+                saved_config
+            };
+            if let Some(session_data) = session_data.write().unwrap().as_mut() {
+                session_data.config_file.contents_when_read = file_contents;
+            }
+            let propagated_changes = apply_new_saved_config(saved_config, session_data);
+            if !propagated_changes {
+                send_to_plugin_thread(session_data, PluginInstruction::ConfigWasWrittenToDisk);
+            }
+            if changed_outside {
+                notify_every_client_that_the_config_file_changed(session_data);
+            }
+        },
+        SaveOutcome::ChangedOutside => {
+            send_to_plugin_thread(
+                session_data,
+                PluginInstruction::ConfigFileChangedSinceRead(client_id),
+            );
+        },
+        SaveOutcome::Failed(file_path) => {
+            log::error!("Failed to write config to disk: {:?}", file_path);
+            send_to_plugin_thread(
+                session_data,
+                PluginInstruction::FailedToWriteConfigToDisk { file_path },
+            );
+        },
+    }
+}
+
+fn notify_every_client_that_the_config_file_changed(
+    session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+) {
+    if let Some(session_data) = session_data.read().unwrap().as_ref() {
+        for client_id in session_data.session_configuration.client_ids() {
+            let _ = session_data
+                .senders
+                .send_to_plugin(PluginInstruction::ConfigFileChangedSinceRead(client_id));
+        }
+    }
+}
+
+fn load_saved_config_from_disk(
+    session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+) -> Result<(Option<String>, Config), Option<PathBuf>> {
+    let paths = session_data.read().unwrap().as_ref().map(|session_data| {
+        (
+            session_data.config_file_path.clone(),
+            session_data.config_file.config_dir.clone(),
+        )
+    });
+    let Some((Some(config_file_path), config_dir)) = paths else {
+        return Err(None);
+    };
+    let contents = read_config_file(&config_file_path).ok().flatten();
+    let reloaded = if contents.is_some() {
+        load_config_file(&config_file_path, config_dir.as_deref())
+    } else {
+        Config::from_default_assets().ok()
+    };
+    match reloaded {
+        Some(reloaded) => Ok((contents, reloaded)),
+        None => Err(Some(config_file_path)),
+    }
+}
+
+fn reload_config_file(session_data: &Arc<RwLock<Option<SessionMetaData>>>) {
+    let (contents, reloaded) = match load_saved_config_from_disk(session_data) {
+        Ok(loaded) => loaded,
+        Err(file_path) => {
+            send_to_plugin_thread(
+                session_data,
+                PluginInstruction::FailedToWriteConfigToDisk { file_path },
+            );
+            return;
+        },
+    };
+    if let Some(session_data) = session_data.write().unwrap().as_mut() {
+        session_data.config_file.contents_when_read = contents;
+    }
+    let propagated_changes = apply_new_saved_config(reloaded, session_data);
+    if !propagated_changes {
+        send_to_plugin_thread(session_data, PluginInstruction::ConfigWasWrittenToDisk);
     }
 }
 
@@ -2811,4 +5791,105 @@ fn get_available_layouts(config_options: &Options) -> (Vec<LayoutInfo>, Vec<Layo
         .as_ref()
         .map(|l| format!("{}", l.display()));
     Layout::list_available_layouts(layout_dir, &default_layout_name)
+}
+
+#[cfg(test)]
+mod theme_file_tests {
+    use super::*;
+
+    fn session_with_theme_dir(theme_dir: &Path) -> SessionConfiguration {
+        let mut config = Config::from_default_assets().unwrap();
+        config.themes = config
+            .themes
+            .merge(config_blocks::built_in_themes().clone());
+        config.options.theme_dir = Some(theme_dir.to_path_buf());
+        let mut session_configuration = SessionConfiguration::default();
+        session_configuration.set_saved_configuration(config.clone());
+        session_configuration.set_client_runtime_configuration(1, config);
+        session_configuration
+    }
+
+    #[test]
+    fn a_copied_theme_is_written_to_its_own_file_and_reaches_the_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let theme_dir = dir.path().join("themes");
+        let mut session_configuration = session_with_theme_dir(&theme_dir);
+        let (path, theme) = session_configuration
+            .write_theme_file(&1, "mine", Some("dracula"), &[])
+            .unwrap();
+        assert_eq!(path, theme_dir.join("mine.kdl"));
+        assert!(theme.sourced_from_external_file);
+        let dracula = config_blocks::built_in_themes()
+            .get_theme("dracula")
+            .unwrap();
+        assert_eq!(theme.palette, dracula.palette);
+        let new_saved_config = session_configuration.saved_config_with_theme("mine", Some(theme));
+        let (changes, dropped) = session_configuration.change_saved_config(new_saved_config);
+        assert!(dropped.is_empty());
+        assert!(changes.iter().any(
+            |(client_id, config)| *client_id == 1 && config.themes.get_theme("mine").is_some()
+        ));
+        let taken = session_configuration
+            .write_theme_file(&1, "mine", Some("dracula"), &[])
+            .unwrap_err();
+        assert!(taken.contains("already exists"));
+        let unknown = session_configuration
+            .write_theme_file(&1, "other", Some("no-such-theme"), &[])
+            .unwrap_err();
+        assert!(unknown.contains("no-such-theme"));
+    }
+
+    #[test]
+    fn editing_a_theme_file_rewrites_its_colours() {
+        let dir = tempfile::tempdir().unwrap();
+        let theme_dir = dir.path().join("themes");
+        let session_configuration = session_with_theme_dir(&theme_dir);
+        session_configuration
+            .write_theme_file(&1, "mine", Some("dracula"), &[])
+            .unwrap();
+        let mut colours = config_blocks::styling_colours(&zellij_utils::data::DEFAULT_STYLES);
+        colours[0] = "#010203".to_owned();
+        let (path, theme) = session_configuration
+            .write_theme_file(&1, "mine", None, &colours)
+            .unwrap();
+        let on_disk = zellij_utils::input::theme::Themes::from_path(path)
+            .unwrap()
+            .get_theme("mine")
+            .cloned()
+            .unwrap();
+        assert_eq!(on_disk.palette, theme.palette);
+        assert_eq!(
+            config_blocks::styling_colours(&on_disk.palette)[0],
+            "#010203"
+        );
+        assert!(session_configuration
+            .write_theme_file(&1, "not-in-a-file", None, &colours)
+            .is_err());
+    }
+
+    #[test]
+    fn deleting_a_folder_theme_brings_back_the_built_in_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let theme_dir = dir.path().join("themes");
+        let session_configuration = session_with_theme_dir(&theme_dir);
+        let mut palette = zellij_utils::data::DEFAULT_STYLES;
+        palette.text_unselected.base = zellij_utils::data::PaletteColor::Rgb((1, 2, 3));
+        let path = config_blocks::create_theme_file(&theme_dir, "dracula", &palette, None).unwrap();
+        let (deleted_path, replacement) = session_configuration
+            .delete_theme_file(&1, "dracula")
+            .unwrap();
+        assert_eq!(deleted_path, path);
+        assert!(!path.exists());
+        assert_eq!(
+            replacement,
+            config_blocks::built_in_themes()
+                .get_theme("dracula")
+                .cloned()
+        );
+        let saved = session_configuration.saved_config_with_theme("gone", None);
+        assert!(saved.themes.get_theme("gone").is_none());
+        assert!(session_configuration
+            .delete_theme_file(&1, "dracula")
+            .is_err());
+    }
 }

@@ -1,6 +1,5 @@
 use super::{KeyResponse, LayoutListScreen, OptimisticUpdate, Screen};
 use crate::errors::{format_kdl_error, ErrorScreen};
-use crate::text_input::{InputAction, TextInput};
 use crate::ui::{truncate_with_ellipsis_start, LayoutDetail, Title};
 use crate::{DisplayLayout, LayoutInfo};
 use zellij_tile::prelude::*;
@@ -63,14 +62,10 @@ impl ImportLayoutScreen {
     }
 
     fn handle_editing_mode_key(&mut self, key: KeyWithModifier) -> KeyResponse {
-        let action = self.name_input.handle_key(key);
-
-        match action {
-            InputAction::Continue => KeyResponse::render(),
-            InputAction::Submit => self.exit_editing_mode(),
-            InputAction::Cancel => self.exit_editing_mode(),
-            InputAction::Complete => KeyResponse::none(),
-            InputAction::NoAction => KeyResponse::none(),
+        match self.name_input.handle_key(&key) {
+            UiResponse::Changed(_) | UiResponse::Consumed => KeyResponse::render(),
+            UiResponse::Submitted(_) | UiResponse::Cancelled => self.exit_editing_mode(),
+            _ => KeyResponse::none(),
         }
     }
 
@@ -173,7 +168,7 @@ impl ImportLayoutScreen {
     fn save_as_line_text(&self, max_width: Option<usize>) -> (String, usize) {
         // Returns (text, cursor_position_in_line)
         let input_text = self.name_input.get_text();
-        let cursor_pos = self.name_input.get_cursor_position();
+        let cursor_pos = self.name_input.cursor_column();
 
         let display_name = if input_text.is_empty() && !self.editing_name {
             "RANDOM"
@@ -191,13 +186,14 @@ impl ImportLayoutScreen {
         let mut cursor_position_in_line = 9 + cursor_pos;
 
         if let Some(max_width) = max_width {
-            if text.chars().count() > max_width {
+            if zellij_tile::graphemes::display_width(&text) > max_width {
                 let truncated_display_name = truncate_with_ellipsis_start(
                     display_name,
-                    max_width.saturating_sub(9 + text_suffix.chars().count()),
+                    max_width
+                        .saturating_sub(9 + zellij_tile::graphemes::display_width(text_suffix)),
                 );
                 text = format!("Save as: {}{}", truncated_display_name, text_suffix);
-                let truncated_len = truncated_display_name.chars().count();
+                let truncated_len = zellij_tile::graphemes::display_width(&truncated_display_name);
                 cursor_position_in_line = 9 + cursor_pos.min(truncated_len);
             }
         }

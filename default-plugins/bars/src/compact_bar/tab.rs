@@ -1,6 +1,6 @@
 use crate::compact_bar::{line::tab_separator, LinePart};
 use ansi_term::{ANSIString, ANSIStrings};
-use unicode_width::UnicodeWidthStr;
+use zellij_tile::graphemes;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::style;
 
@@ -20,16 +20,27 @@ fn cursors<'a>(
     (cursors, len)
 }
 
+pub(crate) fn fit_tab_text(text: String, max_width: usize) -> String {
+    if max_width == 0 || graphemes::display_width(&text) <= max_width {
+        text
+    } else {
+        graphemes::truncate_end(&text, max_width, "…").into_owned()
+    }
+}
+
 pub fn render_tab(
     text: String,
     tab: &TabInfo,
     is_alternate_tab: bool,
+    is_hovered: bool,
+    is_dragged: bool,
     palette: Styling,
     separator: &str,
     dimmed: bool,
+    max_width: usize,
 ) -> LinePart {
     let focused_clients = tab.other_focused_client_slots.as_slice();
-    let separator_width = separator.width();
+    let separator_width = graphemes::display_width(separator);
     let alternate_tab_color = if is_alternate_tab {
         palette.ribbon_unselected.emphasis_1
     } else {
@@ -37,6 +48,8 @@ pub fn render_tab(
     };
     let background_color = if tab.active {
         palette.ribbon_selected.background
+    } else if is_hovered {
+        palette.ribbon_unselected.emphasis_1
     } else if is_alternate_tab {
         alternate_tab_color
     } else {
@@ -64,16 +77,29 @@ pub fn render_tab(
     } else {
         style!(foreground_color, background_color).bold()
     };
+    let text_style = if is_dragged {
+        text_style.italic()
+    } else {
+        text_style
+    };
     let left_separator = style!(separator_fill_color, background_color).paint(separator);
-    let mut tab_text_len = text.width() + (separator_width * 2) + 2;
+    let cursor_info = if focused_clients.is_empty() {
+        None
+    } else {
+        Some(cursors(focused_clients, palette.multiplayer_user_colors))
+    };
+    let cursor_len = cursor_info
+        .as_ref()
+        .map(|(_, extra_length)| *extra_length)
+        .unwrap_or(0);
+    let decoration_len = (separator_width * 2) + 2 + cursor_len;
+    let text = fit_tab_text(text, max_width.saturating_sub(decoration_len));
+    let tab_text_len = graphemes::display_width(&text) + decoration_len;
 
     let tab_styled_text = text_style.paint(format!(" {} ", text));
 
     let right_separator = style!(background_color, separator_fill_color).paint(separator);
-    let tab_styled_text = if !focused_clients.is_empty() {
-        let (cursor_section, extra_length) =
-            cursors(focused_clients, palette.multiplayer_user_colors);
-        tab_text_len += extra_length;
+    let tab_styled_text = if let Some((cursor_section, _)) = cursor_info {
         let mut s = String::new();
         let cursor_beginning = text_style.paint("[").to_string();
         let cursor_section = ANSIStrings(&cursor_section).to_string();
@@ -100,9 +126,12 @@ pub fn tab_style(
     mut tabname: String,
     tab: &TabInfo,
     mut is_alternate_tab: bool,
+    is_hovered: bool,
+    is_dragged: bool,
     palette: Styling,
     capabilities: PluginCapabilities,
     dimmed: bool,
+    max_width: usize,
 ) -> LinePart {
     let separator = tab_separator(capabilities);
 
@@ -118,21 +147,17 @@ pub fn tab_style(
         is_alternate_tab = false;
     }
 
-    render_tab(tabname, tab, is_alternate_tab, palette, separator, dimmed)
-}
-
-pub(crate) fn get_tab_to_focus(
-    tab_line: &[LinePart],
-    active_tab_idx: usize,
-    mouse_click_col: usize,
-) -> Option<usize> {
-    let clicked_line_part = get_clicked_line_part(tab_line, mouse_click_col)?;
-    let clicked_tab_idx = clicked_line_part.tab_index?;
-    let clicked_tab_idx = clicked_tab_idx + 1;
-    if clicked_tab_idx != active_tab_idx {
-        return Some(clicked_tab_idx);
-    }
-    None
+    render_tab(
+        tabname,
+        tab,
+        is_alternate_tab,
+        is_hovered,
+        is_dragged,
+        palette,
+        separator,
+        dimmed,
+        max_width,
+    )
 }
 
 pub(crate) fn get_clicked_line_part(

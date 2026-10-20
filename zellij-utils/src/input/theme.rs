@@ -7,7 +7,7 @@ use std::{
     fmt,
 };
 
-use crate::data::{BorderStyle, BorderStyleOverride, Styling};
+use crate::data::{BorderStyle, BorderStyleOverride, PaletteColor, Styling};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct UiConfig {
@@ -86,13 +86,58 @@ impl Themes {
     pub fn inner(&self) -> &HashMap<String, Theme> {
         &self.0
     }
+    pub fn remove(&mut self, theme_name: &str) -> Option<Theme> {
+        self.0.remove(theme_name)
+    }
+    pub fn retain(&mut self, keep: impl FnMut(&String, &mut Theme) -> bool) {
+        self.0.retain(keep);
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct Theme {
     pub sourced_from_external_file: bool,
     #[serde(flatten)]
     pub palette: Styling,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_colors: Option<TerminalColors>,
+}
+
+pub const TERMINAL_COLOR_NAMES: [&str; 16] = [
+    "black",
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "white",
+    "bright_black",
+    "bright_red",
+    "bright_green",
+    "bright_yellow",
+    "bright_blue",
+    "bright_magenta",
+    "bright_cyan",
+    "bright_white",
+];
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Deserialize, Serialize)]
+pub struct TerminalColors([Option<PaletteColor>; 16]);
+
+impl TerminalColors {
+    pub fn get(&self, slot: usize) -> Option<PaletteColor> {
+        self.0.get(slot).copied().flatten()
+    }
+    pub fn set(&mut self, slot: usize, color: PaletteColor) {
+        self.0[slot] = Some(color);
+    }
+    pub fn iter(&self) -> impl Iterator<Item = Option<PaletteColor>> + '_ {
+        self.0.iter().copied()
+    }
+    pub fn declared(&self) -> usize {
+        self.0.iter().filter(|color| color.is_some()).count()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

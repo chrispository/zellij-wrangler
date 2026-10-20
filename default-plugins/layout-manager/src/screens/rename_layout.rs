@@ -1,5 +1,4 @@
 use super::{ErrorScreen, KeyResponse, LayoutListScreen, OptimisticUpdate, Screen};
-use crate::text_input::{InputAction, TextInput};
 use crate::ui::truncate_with_ellipsis_start;
 use zellij_tile::prelude::*;
 
@@ -20,14 +19,11 @@ impl RenameLayoutScreen {
     }
 
     pub fn handle_key(&mut self, key: KeyWithModifier) -> KeyResponse {
-        let action = self.name_input.handle_key(key);
-
-        match action {
-            InputAction::Continue => KeyResponse::render(),
-            InputAction::Submit => self.attempt_rename(),
-            InputAction::Cancel => KeyResponse::new_screen(self.cancel_rename()),
-            InputAction::Complete => KeyResponse::none(),
-            InputAction::NoAction => KeyResponse::none(),
+        match self.name_input.handle_key(&key) {
+            UiResponse::Changed(_) | UiResponse::Consumed => KeyResponse::render(),
+            UiResponse::Submitted(_) => self.attempt_rename(),
+            UiResponse::Cancelled => KeyResponse::new_screen(self.cancel_rename()),
+            _ => KeyResponse::none(),
         }
     }
 
@@ -72,20 +68,20 @@ impl RenameLayoutScreen {
     fn rename_line_text(&self, max_width: Option<usize>) -> (String, usize) {
         // Returns (text, cursor_position_in_line)
         let prompt = "Rename Layout: ";
-        let prompt_len = prompt.chars().count();
+        let prompt_len = zellij_tile::graphemes::display_width(prompt);
 
         let input_text = self.name_input.get_text();
-        let cursor_pos = self.name_input.get_cursor_position();
+        let cursor_pos = self.name_input.cursor_column();
 
         let mut text = format!("{}{}", prompt, input_text);
         let mut cursor_position_in_line = prompt_len + cursor_pos;
 
         if let Some(max_width) = max_width {
-            if text.chars().count() > max_width {
+            if zellij_tile::graphemes::display_width(&text) > max_width {
                 let truncated_name =
                     truncate_with_ellipsis_start(input_text, max_width.saturating_sub(prompt_len));
                 text = format!("{}{}", prompt, truncated_name);
-                let truncated_len = truncated_name.chars().count();
+                let truncated_len = zellij_tile::graphemes::display_width(&truncated_name);
                 cursor_position_in_line = prompt_len + cursor_pos.min(truncated_len);
             }
         }

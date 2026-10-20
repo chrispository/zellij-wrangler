@@ -29,7 +29,9 @@ pub use super::generated_api::api::{
         LayoutConstraintWithValue as ProtobufLayoutConstraintWithValue,
         MouseEventPayload as ProtobufMouseEventPayload,
         MovePanePayload,
+        MoveTabByTabIdPayload,
         MoveTabDirection as ProtobufMoveTabDirection,
+        MoveTabToPositionPayload,
         NameAndValue as ProtobufNameAndValue,
         NewBlockingPanePayload,
         NewFloatingPanePayload,
@@ -68,6 +70,8 @@ pub use super::generated_api::api::{
         SwitchToModePayload,
         TabIdAndName,
         TabLayoutInfo as ProtobufTabLayoutInfo,
+        TargetPaneIdPayload,
+        TargetTabIdPayload,
         TiledPaneLayout as ProtobufTiledPaneLayout,
         TiledPlacement as ProtobufTiledPlacement,
         UnblockCondition as ProtobufUnblockCondition,
@@ -668,6 +672,14 @@ impl TryFrom<ProtobufAction> for Action {
                 },
                 _ => Err("Wrong payload for Action::Run"),
             },
+            Some(ProtobufActionName::RunInBackground) => match protobuf_action.optional_payload {
+                Some(OptionalPayload::RunPayload(run_command_action)) => {
+                    Ok(Action::RunInBackground {
+                        command: run_command_action.try_into()?,
+                    })
+                },
+                _ => Err("Wrong payload for Action::RunInBackground"),
+            },
             Some(ProtobufActionName::Detach) => match protobuf_action.optional_payload {
                 Some(_) => Err("Detach should not have a payload"),
                 None => Ok(Action::Detach),
@@ -683,6 +695,18 @@ impl TryFrom<ProtobufAction> for Action {
             Some(ProtobufActionName::ToggleTheme) => match protobuf_action.optional_payload {
                 Some(_) => Err("ToggleTheme should not have a payload"),
                 None => Ok(Action::ToggleTheme),
+            },
+            Some(ProtobufActionName::DismissInfoPopups) => match protobuf_action.optional_payload {
+                Some(_) => Err("DismissInfoPopups should not have a payload"),
+                None => Ok(Action::DismissInfoPopups),
+            },
+            Some(ProtobufActionName::OpenContextMenu) => match protobuf_action.optional_payload {
+                Some(_) => Err("OpenContextMenu should not have a payload"),
+                None => Ok(Action::OpenContextMenu),
+            },
+            Some(ProtobufActionName::ToggleSessionCard) => match protobuf_action.optional_payload {
+                Some(_) => Err("ToggleSessionCard should not have a payload"),
+                None => Ok(Action::ToggleSessionCard),
             },
             Some(ProtobufActionName::LeftClick) => match protobuf_action.optional_payload {
                 Some(OptionalPayload::LeftClickPayload(payload)) => {
@@ -1162,6 +1186,121 @@ impl TryFrom<ProtobufAction> for Action {
                     None => Ok(Action::ToggleHostFullscreen),
                 }
             },
+            Some(ProtobufActionName::CloseFocusByPaneId) => {
+                match protobuf_action.optional_payload {
+                    Some(OptionalPayload::TargetPaneIdPayload(payload)) => {
+                        Ok(Action::CloseFocusByPaneId {
+                            pane_id: payload
+                                .pane_id
+                                .ok_or("Missing pane id for Action::CloseFocusByPaneId")?
+                                .try_into()?,
+                        })
+                    },
+                    _ => Err("Wrong payload for Action::CloseFocusByPaneId"),
+                }
+            },
+            Some(ProtobufActionName::ToggleFocusFullscreenByPaneId) => {
+                match protobuf_action.optional_payload {
+                    Some(OptionalPayload::TargetPaneIdPayload(payload)) => {
+                        Ok(Action::ToggleFocusFullscreenByPaneId {
+                            pane_id: payload
+                                .pane_id
+                                .ok_or("Missing pane id for Action::ToggleFocusFullscreenByPaneId")?
+                                .try_into()?,
+                        })
+                    },
+                    _ => Err("Wrong payload for Action::ToggleFocusFullscreenByPaneId"),
+                }
+            },
+            Some(ProtobufActionName::TogglePaneEmbedOrFloatingByPaneId) => {
+                match protobuf_action.optional_payload {
+                    Some(OptionalPayload::TargetPaneIdPayload(payload)) => {
+                        Ok(Action::TogglePaneEmbedOrFloatingByPaneId {
+                            pane_id: payload
+                                .pane_id
+                                .ok_or(
+                                    "Missing pane id for Action::TogglePaneEmbedOrFloatingByPaneId",
+                                )?
+                                .try_into()?,
+                        })
+                    },
+                    _ => Err("Wrong payload for Action::TogglePaneEmbedOrFloatingByPaneId"),
+                }
+            },
+            Some(ProtobufActionName::TogglePanePinnedByPaneId) => {
+                match protobuf_action.optional_payload {
+                    Some(OptionalPayload::TargetPaneIdPayload(payload)) => {
+                        Ok(Action::TogglePanePinnedByPaneId {
+                            pane_id: payload
+                                .pane_id
+                                .ok_or("Missing pane id for Action::TogglePanePinnedByPaneId")?
+                                .try_into()?,
+                        })
+                    },
+                    _ => Err("Wrong payload for Action::TogglePanePinnedByPaneId"),
+                }
+            },
+            Some(ProtobufActionName::TogglePaneInGroupByPaneId) => {
+                match protobuf_action.optional_payload {
+                    Some(OptionalPayload::TargetPaneIdPayload(payload)) => {
+                        Ok(Action::TogglePaneInGroupByPaneId {
+                            pane_id: payload
+                                .pane_id
+                                .ok_or("Missing pane id for Action::TogglePaneInGroupByPaneId")?
+                                .try_into()?,
+                        })
+                    },
+                    _ => Err("Wrong payload for Action::TogglePaneInGroupByPaneId"),
+                }
+            },
+            Some(ProtobufActionName::StartRenamePaneByPaneId) => {
+                match protobuf_action.optional_payload {
+                    Some(OptionalPayload::TargetPaneIdPayload(payload)) => {
+                        Ok(Action::StartRenamePaneByPaneId {
+                            pane_id: payload
+                                .pane_id
+                                .ok_or("Missing pane id for Action::StartRenamePaneByPaneId")?
+                                .try_into()?,
+                        })
+                    },
+                    _ => Err("Wrong payload for Action::StartRenamePaneByPaneId"),
+                }
+            },
+            Some(ProtobufActionName::CloseTabById) => match protobuf_action.optional_payload {
+                Some(OptionalPayload::CloseTabByIdPayload(id)) => Ok(Action::CloseTabById { id }),
+                _ => Err("Wrong payload for Action::CloseTabById"),
+            },
+            Some(ProtobufActionName::StartRenameTabByTabId) => {
+                match protobuf_action.optional_payload {
+                    Some(OptionalPayload::TargetTabIdPayload(payload)) => {
+                        Ok(Action::StartRenameTabByTabId { id: payload.tab_id })
+                    },
+                    _ => Err("Wrong payload for Action::StartRenameTabByTabId"),
+                }
+            },
+            Some(ProtobufActionName::MoveTabByTabId) => match protobuf_action.optional_payload {
+                Some(OptionalPayload::MoveTabByTabIdPayload(payload)) => {
+                    let direction: Direction =
+                        ProtobufMoveTabDirection::try_from(payload.direction)
+                            .ok()
+                            .ok_or("Malformed move tab direction for Action::MoveTabByTabId")?
+                            .try_into()?;
+                    Ok(Action::MoveTabByTabId {
+                        id: payload.tab_id,
+                        direction,
+                    })
+                },
+                _ => Err("Wrong payload for Action::MoveTabByTabId"),
+            },
+            Some(ProtobufActionName::MoveTabToPosition) => match protobuf_action.optional_payload {
+                Some(OptionalPayload::MoveTabToPositionPayload(payload)) => {
+                    Ok(Action::MoveTabToPosition {
+                        id: payload.tab_id,
+                        position: payload.position,
+                    })
+                },
+                _ => Err("Wrong payload for Action::MoveTabToPosition"),
+            },
             _ => Err("Unknown Action"),
         }
     }
@@ -1202,7 +1341,6 @@ impl TryFrom<Action> for ProtobufAction {
             | Action::WriteCharsToPaneId { .. }
             | Action::Paste { .. }
             | Action::GoToTabById { .. }
-            | Action::CloseTabById { .. }
             | Action::RenameTabById { .. }
             | Action::ScrollUpByPaneId { .. }
             | Action::ScrollDownByPaneId { .. }
@@ -1217,13 +1355,9 @@ impl TryFrom<Action> for ProtobufAction {
             | Action::MovePaneBackwardsByPaneId { .. }
             | Action::ClearScreenByPaneId { .. }
             | Action::EditScrollbackByPaneId { .. }
-            | Action::ToggleFocusFullscreenByPaneId { .. }
             | Action::ToggleFocusNoUiFullscreenByPaneId { .. }
-            | Action::TogglePaneEmbedOrFloatingByPaneId { .. }
-            | Action::CloseFocusByPaneId { .. }
             | Action::RenamePaneByPaneId { .. }
             | Action::UndoRenamePaneByPaneId { .. }
-            | Action::TogglePanePinnedByPaneId { .. }
             | Action::FocusPaneByPaneId { .. }
             | Action::UndoRenameTabByTabId { .. }
             | Action::ToggleActiveSyncTabByTabId { .. }
@@ -1231,10 +1365,76 @@ impl TryFrom<Action> for ProtobufAction {
             | Action::PreviousSwapLayoutByTabId { .. }
             | Action::NextSwapLayoutByTabId { .. }
             | Action::ApplyTiledSwapLayoutByTabId { .. }
-            | Action::ApplyFloatingSwapLayoutByTabId { .. }
-            | Action::MoveTabByTabId { .. } => {
+            | Action::ApplyFloatingSwapLayoutByTabId { .. } => {
                 Err("These are CLI-only actions, not available in keybindings")
             },
+            Action::CloseFocusByPaneId { pane_id } => Ok(ProtobufAction {
+                name: ProtobufActionName::CloseFocusByPaneId as i32,
+                optional_payload: Some(OptionalPayload::TargetPaneIdPayload(TargetPaneIdPayload {
+                    pane_id: Some(pane_id.try_into()?),
+                })),
+            }),
+            Action::ToggleFocusFullscreenByPaneId { pane_id } => Ok(ProtobufAction {
+                name: ProtobufActionName::ToggleFocusFullscreenByPaneId as i32,
+                optional_payload: Some(OptionalPayload::TargetPaneIdPayload(TargetPaneIdPayload {
+                    pane_id: Some(pane_id.try_into()?),
+                })),
+            }),
+            Action::TogglePaneEmbedOrFloatingByPaneId { pane_id } => Ok(ProtobufAction {
+                name: ProtobufActionName::TogglePaneEmbedOrFloatingByPaneId as i32,
+                optional_payload: Some(OptionalPayload::TargetPaneIdPayload(TargetPaneIdPayload {
+                    pane_id: Some(pane_id.try_into()?),
+                })),
+            }),
+            Action::TogglePanePinnedByPaneId { pane_id } => Ok(ProtobufAction {
+                name: ProtobufActionName::TogglePanePinnedByPaneId as i32,
+                optional_payload: Some(OptionalPayload::TargetPaneIdPayload(TargetPaneIdPayload {
+                    pane_id: Some(pane_id.try_into()?),
+                })),
+            }),
+            Action::TogglePaneInGroupByPaneId { pane_id } => Ok(ProtobufAction {
+                name: ProtobufActionName::TogglePaneInGroupByPaneId as i32,
+                optional_payload: Some(OptionalPayload::TargetPaneIdPayload(TargetPaneIdPayload {
+                    pane_id: Some(pane_id.try_into()?),
+                })),
+            }),
+            Action::StartRenamePaneByPaneId { pane_id } => Ok(ProtobufAction {
+                name: ProtobufActionName::StartRenamePaneByPaneId as i32,
+                optional_payload: Some(OptionalPayload::TargetPaneIdPayload(TargetPaneIdPayload {
+                    pane_id: Some(pane_id.try_into()?),
+                })),
+            }),
+            Action::CloseTabById { id } => Ok(ProtobufAction {
+                name: ProtobufActionName::CloseTabById as i32,
+                optional_payload: Some(OptionalPayload::CloseTabByIdPayload(id)),
+            }),
+            Action::StartRenameTabByTabId { id } => Ok(ProtobufAction {
+                name: ProtobufActionName::StartRenameTabByTabId as i32,
+                optional_payload: Some(OptionalPayload::TargetTabIdPayload(TargetTabIdPayload {
+                    tab_id: id,
+                })),
+            }),
+            Action::MoveTabByTabId { id, direction } => {
+                let direction: ProtobufMoveTabDirection = direction.try_into()?;
+                Ok(ProtobufAction {
+                    name: ProtobufActionName::MoveTabByTabId as i32,
+                    optional_payload: Some(OptionalPayload::MoveTabByTabIdPayload(
+                        MoveTabByTabIdPayload {
+                            tab_id: id,
+                            direction: direction as i32,
+                        },
+                    )),
+                })
+            },
+            Action::MoveTabToPosition { id, position } => Ok(ProtobufAction {
+                name: ProtobufActionName::MoveTabToPosition as i32,
+                optional_payload: Some(OptionalPayload::MoveTabToPositionPayload(
+                    MoveTabToPositionPayload {
+                        tab_id: id,
+                        position,
+                    },
+                )),
+            }),
             Action::SwitchToMode { input_mode } => {
                 let input_mode: ProtobufInputMode = input_mode.try_into()?;
                 Ok(ProtobufAction {
@@ -1714,6 +1914,15 @@ impl TryFrom<Action> for ProtobufAction {
                     optional_payload: Some(OptionalPayload::RunPayload(run_command_action)),
                 })
             },
+            Action::RunInBackground {
+                command: run_command_action,
+            } => {
+                let run_command_action: ProtobufRunCommandAction = run_command_action.try_into()?;
+                Ok(ProtobufAction {
+                    name: ProtobufActionName::RunInBackground as i32,
+                    optional_payload: Some(OptionalPayload::RunPayload(run_command_action)),
+                })
+            },
             Action::Detach => Ok(ProtobufAction {
                 name: ProtobufActionName::Detach as i32,
                 optional_payload: None,
@@ -1728,6 +1937,18 @@ impl TryFrom<Action> for ProtobufAction {
             }),
             Action::ToggleTheme => Ok(ProtobufAction {
                 name: ProtobufActionName::ToggleTheme as i32,
+                optional_payload: None,
+            }),
+            Action::DismissInfoPopups => Ok(ProtobufAction {
+                name: ProtobufActionName::DismissInfoPopups as i32,
+                optional_payload: None,
+            }),
+            Action::ToggleSessionCard => Ok(ProtobufAction {
+                name: ProtobufActionName::ToggleSessionCard as i32,
+                optional_payload: None,
+            }),
+            Action::OpenContextMenu => Ok(ProtobufAction {
+                name: ProtobufActionName::OpenContextMenu as i32,
                 optional_payload: None,
             }),
             Action::LaunchOrFocusPlugin {
@@ -2259,6 +2480,7 @@ impl TryFrom<ProtobufMouseEventPayload> for MouseEvent {
             wheel_down: protobuf_event.wheel_down as bool,
             wheel_left: protobuf_event.wheel_left as bool,
             wheel_right: protobuf_event.wheel_right as bool,
+            wheel_lines: u16::try_from(protobuf_event.wheel_lines).unwrap_or(u16::MAX),
             shift: protobuf_event.shift as bool,
             alt: protobuf_event.alt as bool,
             ctrl: protobuf_event.ctrl as bool,
@@ -2283,6 +2505,7 @@ impl TryFrom<MouseEvent> for ProtobufMouseEventPayload {
             wheel_down: event.wheel_down as bool,
             wheel_left: event.wheel_left as bool,
             wheel_right: event.wheel_right as bool,
+            wheel_lines: u32::from(event.wheel_lines),
             shift: event.shift as bool,
             alt: event.alt as bool,
             ctrl: event.ctrl as bool,
@@ -3413,6 +3636,134 @@ mod tests {
     use super::*;
     use crate::input::options::PaneFrameStyle;
 
+    fn by_id_actions() -> Vec<Action> {
+        vec![
+            Action::CloseFocusByPaneId {
+                pane_id: PaneId::Terminal(1),
+            },
+            Action::ToggleFocusFullscreenByPaneId {
+                pane_id: PaneId::Plugin(2),
+            },
+            Action::TogglePaneEmbedOrFloatingByPaneId {
+                pane_id: PaneId::Terminal(3),
+            },
+            Action::TogglePanePinnedByPaneId {
+                pane_id: PaneId::Terminal(4),
+            },
+            Action::TogglePaneInGroupByPaneId {
+                pane_id: PaneId::Plugin(5),
+            },
+            Action::StartRenamePaneByPaneId {
+                pane_id: PaneId::Terminal(6),
+            },
+            Action::CloseTabById { id: 7 },
+            Action::StartRenameTabByTabId { id: 8 },
+            Action::MoveTabByTabId {
+                id: 9,
+                direction: Direction::Left,
+            },
+            Action::MoveTabByTabId {
+                id: 10,
+                direction: Direction::Right,
+            },
+            Action::MoveTabToPosition {
+                id: 11,
+                position: 3,
+            },
+            Action::MoveTabToPosition {
+                id: 12,
+                position: crate::data::TAB_POSITION_END,
+            },
+        ]
+    }
+
+    #[test]
+    fn run_in_background_round_trips_over_protobuf() {
+        let original = Action::RunInBackground {
+            command: RunCommandAction {
+                command: PathBuf::from("send-scroll"),
+                args: vec!["up".to_owned()],
+                cwd: Some(PathBuf::from("/tmp")),
+                ..Default::default()
+            },
+        };
+        let protobuf: ProtobufAction = original.clone().try_into().unwrap();
+        assert_eq!(protobuf.name, ProtobufActionName::RunInBackground as i32);
+        let decoded: Action = protobuf.try_into().unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn by_id_actions_keep_their_target_over_protobuf() {
+        for original in by_id_actions() {
+            let protobuf: ProtobufAction = original
+                .clone()
+                .try_into()
+                .unwrap_or_else(|e| panic!("{:?} did not encode: {}", original, e));
+            let decoded: Action = protobuf
+                .try_into()
+                .unwrap_or_else(|e| panic!("{:?} did not decode: {}", original, e));
+            assert_eq!(original, decoded);
+        }
+    }
+
+    #[test]
+    fn close_tab_by_id_uses_the_upstream_payload() {
+        let protobuf: ProtobufAction = Action::CloseTabById { id: 7 }.try_into().unwrap();
+        assert_eq!(protobuf.name, ProtobufActionName::CloseTabById as i32);
+        assert_eq!(
+            protobuf.optional_payload,
+            Some(OptionalPayload::CloseTabByIdPayload(7))
+        );
+    }
+
+    #[test]
+    fn by_id_actions_without_a_target_are_rejected_over_protobuf() {
+        let pane_actions = [
+            ProtobufActionName::CloseFocusByPaneId,
+            ProtobufActionName::ToggleFocusFullscreenByPaneId,
+            ProtobufActionName::TogglePaneEmbedOrFloatingByPaneId,
+            ProtobufActionName::TogglePanePinnedByPaneId,
+            ProtobufActionName::TogglePaneInGroupByPaneId,
+            ProtobufActionName::StartRenamePaneByPaneId,
+        ];
+        for name in pane_actions {
+            for optional_payload in [
+                None,
+                Some(OptionalPayload::TargetPaneIdPayload(TargetPaneIdPayload {
+                    pane_id: None,
+                })),
+            ] {
+                let protobuf = ProtobufAction {
+                    name: name as i32,
+                    optional_payload: optional_payload.clone(),
+                };
+                assert!(
+                    Action::try_from(protobuf).is_err(),
+                    "{:?} with {:?} decoded without a pane id",
+                    name,
+                    optional_payload
+                );
+            }
+        }
+        for name in [
+            ProtobufActionName::CloseTabById,
+            ProtobufActionName::StartRenameTabByTabId,
+            ProtobufActionName::MoveTabByTabId,
+            ProtobufActionName::MoveTabToPosition,
+        ] {
+            let protobuf = ProtobufAction {
+                name: name as i32,
+                optional_payload: None,
+            };
+            assert!(
+                Action::try_from(protobuf).is_err(),
+                "{:?} decoded without a tab id",
+                name
+            );
+        }
+    }
+
     #[test]
     fn new_tiled_pane_action_carries_a_border_style_over_protobuf() {
         use crate::data::LineStyle;
@@ -3529,6 +3880,15 @@ mod tests {
             let decoded: Action = protobuf.try_into().expect("decode");
             assert_eq!(original, decoded);
         }
+    }
+
+    #[test]
+    fn toggle_session_card_action_protobuf_round_trip() {
+        let protobuf: ProtobufAction = Action::ToggleSessionCard.try_into().unwrap();
+        assert_eq!(
+            Action::try_from(protobuf).unwrap(),
+            Action::ToggleSessionCard
+        );
     }
 
     #[test]

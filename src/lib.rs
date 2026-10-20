@@ -41,6 +41,17 @@ fn main() {
     create_config_and_cache_folders();
     let opts = CliArgs::parse_for_distribution();
 
+    if let Some(Command::Setup(ref setup)) = opts.command {
+        if setup.install_desktop_entry {
+            commands::install_desktop_entry();
+            std::process::exit(0);
+        }
+        if setup.uninstall_desktop_entry {
+            commands::uninstall_desktop_entry();
+            std::process::exit(0);
+        }
+    }
+
     {
         let config = Config::try_from(&opts).ok();
         if let Some(Command::Action(cli_action)) = opts.command {
@@ -49,6 +60,13 @@ fn main() {
         }
         if let Some(Command::Subscribe(subscribe_cli)) = opts.command {
             commands::subscribe_to_session(subscribe_cli, opts.session, config);
+            std::process::exit(0);
+        }
+        if let Some(Command::Prompt(prompt_cli)) = opts.command {
+            commands::prompt_in_session(prompt_cli, opts.session, config);
+        }
+        if let Some(Command::Window(window_args)) = opts.command.clone() {
+            commands::start_window(window_args, opts);
             std::process::exit(0);
         }
         if let Some(Command::Sessions(Sessions::Run {
@@ -252,6 +270,8 @@ fn main() {
                 in_place_plugin: None,
                 plugin_cwd: None,
                 plugin_title: None,
+                popup: None,
+                popup_no_focus: false,
             };
             commands::send_action_to_session(command_cli_action, opts.session, config);
             std::process::exit(0);

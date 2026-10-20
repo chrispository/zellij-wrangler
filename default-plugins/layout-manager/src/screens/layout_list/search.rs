@@ -1,4 +1,3 @@
-use crate::text_input::TextInput;
 use crate::DisplayLayout;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -136,9 +135,9 @@ impl SearchState {
 
         // Show cursor when typing
         if self.typing_filter {
-            let cursor_pos = self.filter_input.get_cursor_position();
+            let cursor_pos = self.filter_input.cursor_column();
             show_cursor(Some((
-                filter_prompt.chars().count() + 1 + cursor_pos + base_x,
+                zellij_tile::graphemes::display_width(&filter_prompt) + 1 + cursor_pos + base_x,
                 base_y,
             )));
         } else {

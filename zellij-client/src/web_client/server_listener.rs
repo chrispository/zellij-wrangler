@@ -37,6 +37,7 @@ pub fn zellij_server_listener(
     client_size: Option<Size>,
     client_pixel_dims: Option<SizeInPixels>,
     pending_welcome_sessions: PendingWelcomeSessions,
+    is_structured_client: bool,
 ) {
     let _server_listener_thread = std::thread::Builder::new()
         .name("server_listener".to_string())
@@ -62,8 +63,8 @@ pub fn zellij_server_listener(
                 'reconnect_loop: loop {
                     let reconnect_info = reconnect_to_session.take();
                     let initial_layout = reconnect_info.as_ref().and_then(|r| r.layout.clone());
-                    let path = {
-                        let Some(session_name) = reconnect_info
+                    let session_name = {
+                        let Some(name) = reconnect_info
                             .as_ref()
                             .and_then(|r| r.name.clone())
                             .or_else(generate_unique_session_name)
@@ -72,14 +73,12 @@ pub fn zellij_server_listener(
                             client_connection_bus.close_connection();
                             return;
                         };
-                        let mut sock_dir = zellij_utils::consts::ZELLIJ_SOCK_DIR.clone();
-                        if let Err(e) = zellij_utils::sessions::validate_session_name(&session_name) {
+                        if let Err(e) = zellij_utils::sessions::validate_session_name(&name) {
                             log::error!("Invalid session name: {}", e);
                             client_connection_bus.close_connection();
                             return;
                         }
-                        sock_dir.push(session_name.clone());
-                        sock_dir.to_str().unwrap().to_owned()
+                        name
                     };
 
                     reload_config_from_disk(&mut config, &mut config_options, &config_file_path);
@@ -105,13 +104,6 @@ pub fn zellij_server_listener(
                         },
                     };
 
-                    let session_name = PathBuf::from(path.clone())
-                        .file_name()
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .to_owned();
-
                     // Look up read-only status from connection table
                     let is_read_only = connection_table
                         .lock()
@@ -129,7 +121,7 @@ pub fn zellij_server_listener(
 
                     let should_create_new_session = !session_exists;
                     let first_message = create_first_message(is_read_only, config_file_path.clone(), client_attributes.clone(), config_options.clone(), should_create_new_session, &session_name, initial_layout);
-                    let zellij_ipc_pipe = create_ipc_pipe(&session_name);
+                    let zellij_ipc_pipe = create_ipc_pipe(&session_name, session_exists);
 
                     session_manager.spawn_session_if_needed(
                         &session_name,
@@ -151,6 +143,12 @@ pub fn zellij_server_listener(
                         });
                     }
 
+                    if is_structured_client {
+                        for declaration in structured_client_declarations() {
+                            os_input.send_to_server(declaration);
+                        }
+                    }
+
                     // Seed the server's host-terminal-query cache with web
                     // client state derived from Config (fg/bg/palette).
                     // Without this, OSC 10/11/4 queries from apps
@@ -158,10 +156,12 @@ pub fn zellij_server_listener(
                     // back empty. Pixel dimensions are seeded separately
                     // via the TerminalMetrics control message once the
                     // browser has reported them.
-                    let seeds = host_query_seed_msgs
-                        .get_or_insert_with(|| build_host_query_seed_msgs(&config, &config_options));
-                    for seed in seeds.iter().cloned() {
-                        os_input.send_to_server(seed);
+                    if !is_structured_client {
+                        let seeds = host_query_seed_msgs
+                            .get_or_insert_with(|| build_host_query_seed_msgs(&config, &config_options));
+                        for seed in seeds.iter().cloned() {
+                            os_input.send_to_server(seed);
+                        }
                     }
 
                     if let Some(tx) = attachment_complete_tx.take() {
@@ -186,12 +186,22 @@ pub fn zellij_server_listener(
                         }
                         match msg.map(|m| m.0) {
                             Some(ServerToClientMsg::UnblockInputThread) => {},
+                            Some(ServerToClientMsg::HostTerminalThemeChanged { mode }) => {
+                                if is_structured_client {
+                                    client_connection_bus.send_control(
+                                        WebServerToWebClientControlMessage::HostTerminalThemeChanged {
+                                            mode,
+                                        },
+                                    );
+                                }
+                            },
                             Some(ServerToClientMsg::Connected) => {},
+                            Some(ServerToClientMsg::WindowSettingsChanged { .. }) => {},
                             Some(ServerToClientMsg::CliPipeOutput { .. } ) => {},
                             Some(ServerToClientMsg::UnblockCliPipeInput { .. } ) => {},
                             Some(ServerToClientMsg::StartWebServer { .. } ) => {},
                             Some(ServerToClientMsg::Exit{exit_reason}) => {
-                                handle_exit_reason(&mut client_connection_bus, exit_reason);
+                                handle_exit_reason(&mut client_connection_bus, exit_reason, is_structured_client);
                                 os_input.send_to_server(ClientToServerMsg::ClientExited);
                                 break;
                             },
@@ -219,9 +229,11 @@ pub fn zellij_server_listener(
                                 );
                             },
                             Some(ServerToClientMsg::MobileState{payload}) => {
-                                client_connection_bus.send_control(
-                                    WebServerToWebClientControlMessage::MobileState { payload },
-                                );
+                                if !is_structured_client {
+                                    client_connection_bus.send_control(
+                                        WebServerToWebClientControlMessage::MobileState { payload },
+                                    );
+                                }
                             },
                             Some(ServerToClientMsg::Log{lines}) => {
                                 client_connection_bus.send_control(
@@ -241,25 +253,45 @@ pub fn zellij_server_listener(
                                 );
                             },
                             Some(ServerToClientMsg::ConfigFileUpdated) => {
-
-                                if let Some(config_file_path) = &config_file_path {
-                                    if let Ok(new_config) = Config::from_path(&config_file_path, Some(config.clone())) {
-                                        // Re-seed host-query cache for this client
-                                        // so OSC 10/11/4 replies follow the new theme.
+                                let mut new_config = config.clone();
+                                let mut new_config_options = config_options.clone();
+                                reload_config_from_disk(&mut new_config, &mut new_config_options, &config_file_path);
+                                {
+                                    // Re-seed host-query cache for this client
+                                    // so OSC 10/11/4 replies follow the new theme.
+                                    if !is_structured_client {
                                         for seed in build_host_query_seed_msgs(&new_config, &config_options) {
                                             os_input.send_to_server(seed);
                                         }
-                                        let set_config_payload = SetConfigPayload::from(&new_config);
-                                        client_connection_bus.send_control(
-                                            WebServerToWebClientControlMessage::SetConfig(set_config_payload),
-                                        );
                                     }
+                                    let set_config_payload = SetConfigPayload::from(&new_config);
+                                    client_connection_bus.send_control(
+                                        WebServerToWebClientControlMessage::SetConfig(set_config_payload),
+                                    );
+                                }
+                            },
+                            Some(ServerToClientMsg::RenderFrame { frame }) => {
+                                if is_structured_client {
+                                    client_connection_bus.send_frame(frame);
                                 }
                             },
                             // Subscribe-only messages — not relevant for web clients
                             Some(ServerToClientMsg::PaneRenderUpdate { .. }) => {},
                             Some(ServerToClientMsg::SubscribedPaneClosed { .. }) => {},
                             Some(ServerToClientMsg::EmitNestedSessionFrame { .. }) => {},
+                            Some(ServerToClientMsg::ForwardQueryToHost {
+                                token,
+                                query_bytes,
+                                resolve_async,
+                            }) if is_structured_client => {
+                                client_connection_bus.send_control(
+                                    WebServerToWebClientControlMessage::ForwardQueryToHost {
+                                        token,
+                                        query_bytes,
+                                        resolve_async,
+                                    },
+                                );
+                            },
                             Some(ServerToClientMsg::ForwardQueryToHost { token, .. }) => {
                                 // Reply immediately with empty reply_bytes.
                                 // This is the existing convention that signals
@@ -295,7 +327,34 @@ pub fn zellij_server_listener(
         });
 }
 
-fn handle_exit_reason(client_connection_bus: &mut ClientConnectionBus, exit_reason: ExitReason) {
+pub fn structured_client_declarations() -> Vec<ClientToServerMsg> {
+    vec![
+        ClientToServerMsg::KittyGraphicsSupport {
+            supported: true,
+            local_media: false,
+        },
+        ClientToServerMsg::SixelSupport { supported: true },
+        ClientToServerMsg::StructuredRenderSupport { supported: true },
+    ]
+}
+
+fn handle_exit_reason(
+    client_connection_bus: &mut ClientConnectionBus,
+    exit_reason: ExitReason,
+    is_structured_client: bool,
+) {
+    if is_structured_client {
+        let kicked = exit_reason == ExitReason::KickedByHost;
+        client_connection_bus.send_control(WebServerToWebClientControlMessage::Exit {
+            reason: exit_reason,
+        });
+        if kicked {
+            client_connection_bus.close_connection_kicked();
+        } else {
+            client_connection_bus.close_connection();
+        }
+        return;
+    }
     match exit_reason {
         ExitReason::KickedByHost => {
             client_connection_bus.close_connection_kicked();
@@ -340,4 +399,27 @@ fn reload_config_from_disk(
             log::error!("Failed to reload config: {}", e);
         },
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_structured_client_is_declared_capable_of_inline_graphics_and_nothing_local() {
+        let declarations = structured_client_declarations();
+        assert_eq!(
+            declarations,
+            vec![
+                ClientToServerMsg::KittyGraphicsSupport {
+                    supported: true,
+                    local_media: false,
+                },
+                ClientToServerMsg::SixelSupport { supported: true },
+                ClientToServerMsg::StructuredRenderSupport { supported: true },
+            ],
+            "a remote structured client renders inline media itself and can read no file this \
+             machine writes"
+        );
+    }
 }

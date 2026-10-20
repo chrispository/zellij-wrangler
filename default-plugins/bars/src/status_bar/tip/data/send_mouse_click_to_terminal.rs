@@ -1,5 +1,6 @@
+use crate::status_bar::unstyled_len;
 use ansi_term::{
-    unstyled_len, ANSIString, ANSIStrings,
+    ANSIString, ANSIStrings,
     Color::{Fixed, RGB},
     Style,
 };
@@ -17,6 +18,7 @@ macro_rules! strings {
         LinePart {
             part: format!("{}", ansi_strings),
             len: unstyled_len(&ansi_strings),
+            ..Default::default()
         }
     }};
 }

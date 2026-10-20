@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 pub mod client_screen;
+mod deadline;
 pub mod fake_client_os_api;
 pub mod fake_pty;
 pub mod fake_server_os_api;
@@ -25,8 +26,8 @@ pub use nested::{
     NestedDepthThreeHarness, NestedHarness,
 };
 pub use runner::{
-    assert_same_rendered_grid, normalized, BackgroundTestSession, TestClient, TestRunner,
-    TestSession,
+    assert_same_rendered_grid, normalized, BackgroundTestSession, CliCaller, CliOutputHandle,
+    CliResult, TestClient, TestRunner, TestSession,
 };
 pub use zellij_utils::data::LayoutInfo;
 pub use zellij_utils::pane_size::Size;
@@ -39,4 +40,13 @@ pub fn default_timeout() -> Duration {
         .and_then(|v| v.parse().ok())
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(10))
+}
+
+pub fn hard_cap_timeout() -> Duration {
+    std::env::var("ZELLIJ_TEST_HARD_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(60))
+        .max(default_timeout())
 }

@@ -1,14 +1,21 @@
 pub use super::generated_api::api::{
     action::{Action as ProtobufAction, Position as ProtobufPosition},
     event::{
+        context_menu_action::Action as ProtobufContextMenuActionKind,
         event::Payload as ProtobufEventPayload,
         layout_parsing_error::ErrorType as ProtobufLayoutParsingErrorType,
         pane_scrollback_response, ActionCompletePayload as ProtobufActionCompletePayload,
         ActivePaneScrollPayload as ProtobufActivePaneScrollPayload,
+        AvailableKeybindPresetsPayload as ProtobufAvailableKeybindPresetsPayload,
         AvailableLayoutInfoPayload as ProtobufAvailableLayoutInfoPayload,
-        ClientInfo as ProtobufClientInfo, ClientPaneHistory as ProtobufClientPaneHistory,
+        ClickedPaneAction as ProtobufClickedPaneAction,
+        ClickedTabAction as ProtobufClickedTabAction, ClientInfo as ProtobufClientInfo,
+        ClientPaneHistory as ProtobufClientPaneHistory,
         ClientTabHistory as ProtobufClientTabHistory,
         CommandChangedPayload as ProtobufCommandChangedPayload, ContextItem as ProtobufContextItem,
+        ContextMenuAction as ProtobufContextMenuAction,
+        ContextMenuEntry as ProtobufContextMenuEntry, ContextMenuKind as ProtobufContextMenuKind,
+        ContextMenuPayload as ProtobufContextMenuPayload,
         CopyDestination as ProtobufCopyDestination, CwdChangedPayload as ProtobufCwdChangedPayload,
         Event as ProtobufEvent, EventNameList as ProtobufEventNameList,
         EventType as ProtobufEventType, FileMetadata as ProtobufFileMetadata,
@@ -17,8 +24,11 @@ pub use super::generated_api::api::{
         HostTerminalThemeIndication as ProtobufHostTerminalThemeIndication,
         InputModeKeybinds as ProtobufInputModeKeybinds, KdlError as ProtobufKdlError,
         KdlErrorVariant as ProtobufKdlErrorVariant, KeyBind as ProtobufKeyBind,
-        LayoutInfo as ProtobufLayoutInfo, LayoutMetadata as ProtobufLayoutMetadata,
-        LayoutParsingError as ProtobufLayoutParsingError,
+        KeybindPresetExample as ProtobufKeybindPresetExample,
+        KeybindPresetInfo as ProtobufKeybindPresetInfo,
+        KeybindPresetSource as ProtobufKeybindPresetSource,
+        KeybindPresetWithError as ProtobufKeybindPresetWithError, LayoutInfo as ProtobufLayoutInfo,
+        LayoutMetadata as ProtobufLayoutMetadata, LayoutParsingError as ProtobufLayoutParsingError,
         LayoutWithError as ProtobufLayoutWithError, ModeUpdatePayload as ProtobufModeUpdatePayload,
         NestedSessionEndReason as ProtobufNestedSessionEndReason,
         NestedSessionKeybindsError as ProtobufNestedSessionKeybindsError,
@@ -31,10 +41,10 @@ pub use super::generated_api::api::{
         PaneRenderReportPayload as ProtobufPaneRenderReportPayload,
         PaneScrollbackResponse as ProtobufPaneScrollbackResponse, PaneType as ProtobufPaneType,
         PluginConfigurationChangedPayload as ProtobufPluginConfigurationChangedPayload,
-        PluginInfo as ProtobufPluginInfo, ResurrectableSession as ProtobufResurrectableSession,
-        SelectedText as ProtobufSelectedText, SessionManifest as ProtobufSessionManifest,
+        PluginInfo as ProtobufPluginInfo, PromptResultPayload as ProtobufPromptResultPayload,
+        ResurrectableSession as ProtobufResurrectableSession, SelectedText as ProtobufSelectedText,
+        SessionManifest as ProtobufSessionManifest,
         SoftKeyboardVisibilityChangedPayload as ProtobufSoftKeyboardVisibilityChangedPayload,
-        StyledText as ProtobufStyledText, StyledTextIndices as ProtobufStyledTextIndices,
         SyntaxError as ProtobufSyntaxError, TabInfo as ProtobufTabInfo,
         TabMetadata as ProtobufTabMetadata, UserActionPayload as ProtobufUserActionPayload,
         WebServerStatusPayload as ProtobufWebServerStatusPayload, WebSharing as ProtobufWebSharing,
@@ -42,16 +52,22 @@ pub use super::generated_api::api::{
     },
     input_mode::InputMode as ProtobufInputMode,
     key::Key as ProtobufKey,
-    style::Style as ProtobufStyle,
+    style::{
+        Style as ProtobufStyle, StyledText as ProtobufStyledText,
+        StyledTextIndices as ProtobufStyledTextIndices,
+    },
 };
 #[allow(hidden_glob_reexports)]
 use crate::data::{
-    ClientId, ClientInfo, CopyDestination, Event, EventType, FileMetadata, HostTerminalThemeMode,
-    InputMode, KeyWithModifier, KeybindsVec, LayoutInfo, LayoutMetadata, ModeInfo, Mouse,
-    NestedSessionEndReason, NestedSessionKeybinds, NestedSessionKeybindsError,
-    NestedSessionKeybindsResponse, PaneContents, PaneId, PaneInfo, PaneManifest, PaneMetadata,
-    PaneScrollbackResponse, PermissionStatus, PluginCapabilities, PluginInfo, SelectedText,
-    SessionInfo, Style, StyledText, TabInfo, TabMetadata, WebServerStatus, WebSharing,
+    ClickedPaneAction, ClickedTabAction, ClientId, ClientInfo, ContextMenuAction,
+    ContextMenuContext, ContextMenuEntry, ContextMenuKind, CopyDestination, Direction, Event,
+    EventType, FileMetadata, HostTerminalThemeMode, InputMode, KeyModifier, KeyWithModifier,
+    KeybindPresetInfo, KeybindPresetSource, KeybindPresetWithError, KeybindsVec, LayoutInfo,
+    LayoutMetadata, ModeInfo, Mouse, NestedSessionEndReason, NestedSessionKeybinds,
+    NestedSessionKeybindsError, NestedSessionKeybindsResponse, PaneContents, PaneId, PaneInfo,
+    PaneManifest, PaneMetadata, PaneScrollbackResponse, PermissionStatus, PluginCapabilities,
+    PluginInfo, SelectedText, SessionInfo, SettingKey, Style, StyledText, TabInfo, TabMetadata,
+    WebServerStatus, WebSharing,
 };
 
 use crate::errors::prelude::*;
@@ -63,6 +79,22 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+
+pub fn mouse_modifiers(protobuf_event: &ProtobufEvent) -> std::collections::BTreeSet<KeyModifier> {
+    let mut modifiers = std::collections::BTreeSet::new();
+    if let Some(event::Payload::MouseEventPayload(payload)) = protobuf_event.payload.as_ref() {
+        if payload.shift {
+            modifiers.insert(KeyModifier::Shift);
+        }
+        if payload.ctrl {
+            modifiers.insert(KeyModifier::Ctrl);
+        }
+        if payload.alt {
+            modifiers.insert(KeyModifier::Alt);
+        }
+    }
+    modifiers
+}
 
 /// Converts a keybinding table into the protobuf form used wherever keybindings cross the
 /// plugin boundary.
@@ -534,6 +566,54 @@ impl TryFrom<ProtobufEvent> for Event {
                 None => Ok(Event::ConfigWasWrittenToDisk),
                 _ => Err("Malformed payload for the ConfigWasWrittenToDisk Event"),
             },
+            Some(ProtobufEventType::ConfigFileChangedSinceRead) => match protobuf_event.payload {
+                None => Ok(Event::ConfigFileChangedSinceRead),
+                _ => Err("Malformed payload for the ConfigFileChangedSinceRead Event"),
+            },
+            Some(ProtobufEventType::SessionSuggestions) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::SessionSuggestionsPayload(payload)) => {
+                    Ok(Event::SessionSuggestions(payload.into()))
+                },
+                _ => Err("Malformed payload for the SessionSuggestions Event"),
+            },
+            Some(ProtobufEventType::SessionCountsUpdate) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::SessionCountsUpdatePayload(payload)) => {
+                    Ok(Event::SessionCountsUpdate(payload.into()))
+                },
+                _ => Err("Malformed payload for the SessionCountsUpdate Event"),
+            },
+            Some(ProtobufEventType::FolderSessionsUpdate) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::FolderSessionsUpdatePayload(payload)) => {
+                    Ok(Event::FolderSessionsUpdate(payload.into()))
+                },
+                _ => Err("Malformed payload for the FolderSessionsUpdate Event"),
+            },
+            Some(ProtobufEventType::TerminalCommandSubmitted) => match protobuf_event.payload {
+                None => Ok(Event::TerminalCommandSubmitted),
+                _ => Err("Malformed payload for the TerminalCommandSubmitted Event"),
+            },
+            Some(ProtobufEventType::SessionPreview) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::SessionPreviewPayload(payload)) => {
+                    Ok(Event::SessionPreview(payload.into()))
+                },
+                _ => Err("Malformed payload for the SessionPreview Event"),
+            },
+            Some(ProtobufEventType::SavedSessionPreview) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::SavedSessionPreviewPayload(payload)) => {
+                    Ok(Event::SavedSessionPreview(payload.into()))
+                },
+                _ => Err("Malformed payload for the SavedSessionPreview Event"),
+            },
+            Some(ProtobufEventType::PromptResult) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::PromptResultPayload(payload)) => {
+                    let result = payload
+                        .result
+                        .ok_or("Malformed payload for the PromptResult Event")?
+                        .try_into()?;
+                    Ok(Event::PromptResult(payload.request_id, result))
+                },
+                _ => Err("Malformed payload for the PromptResult Event"),
+            },
             Some(ProtobufEventType::WebServerStatus) => match protobuf_event.payload {
                 Some(ProtobufEventPayload::WebServerStatusPayload(web_server_status)) => {
                     Ok(Event::WebServerStatus(web_server_status.try_into()?))
@@ -718,6 +798,76 @@ impl TryFrom<ProtobufEvent> for Event {
                 },
                 _ => Err("Malformed payload for the NestedSessionModeUpdate Event"),
             },
+            Some(ProtobufEventType::ContextMenu) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::ContextMenuPayload(payload)) => {
+                    let kind = match ProtobufContextMenuKind::try_from(payload.kind) {
+                        Ok(ProtobufContextMenuKind::Pane) => ContextMenuKind::Pane,
+                        Ok(ProtobufContextMenuKind::PaneFrame) => ContextMenuKind::PaneFrame,
+                        Ok(ProtobufContextMenuKind::Tab) => ContextMenuKind::Tab,
+                        Ok(ProtobufContextMenuKind::Bar) => ContextMenuKind::Bar,
+                        Err(_) => return Err("Unknown kind in the ContextMenu Event"),
+                    };
+                    let pane_id = match payload.pane_id {
+                        Some(pane_id) => Some(PaneId::try_from(pane_id)?),
+                        None => None,
+                    };
+                    let mut entries = vec![];
+                    for entry in payload.entries {
+                        if entry.is_separator {
+                            entries.push(ContextMenuEntry::Separator);
+                        } else {
+                            let mut actions = vec![];
+                            for action in entry.actions {
+                                actions.push(ContextMenuAction::try_from(action)?);
+                            }
+                            entries.push(ContextMenuEntry::Item {
+                                label: entry.label,
+                                actions,
+                            });
+                        }
+                    }
+                    Ok(Event::ContextMenu(
+                        ContextMenuContext {
+                            kind,
+                            pane_id,
+                            pane_is_floating: payload.pane_is_floating,
+                            tab_index: payload.tab_index.map(|t| t as usize),
+                            tab_id: payload.tab_id.map(|t| t as usize),
+                            tab_count: payload.tab_count as usize,
+                            line: payload.line as usize,
+                            column: payload.column as usize,
+                            client_id: payload.client_id as ClientId,
+                        },
+                        entries,
+                    ))
+                },
+                _ => Err("Malformed payload for the ContextMenu Event"),
+            },
+            Some(ProtobufEventType::AvailableKeybindPresets) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::AvailableKeybindPresetsPayload(payload)) => {
+                    Ok(Event::AvailableKeybindPresets(
+                        payload.presets.into_iter().map(Into::into).collect(),
+                        payload
+                            .presets_with_errors
+                            .into_iter()
+                            .map(Into::into)
+                            .collect(),
+                    ))
+                },
+                _ => Err("Malformed payload for the AvailableKeybindPresets Event"),
+            },
+            Some(ProtobufEventType::ConfigChangesDropped) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::ConfigChangesDroppedPayload(payload)) => {
+                    Ok(Event::ConfigChangesDropped(
+                        payload
+                            .keys
+                            .iter()
+                            .filter_map(|key| SettingKey::from_id(key))
+                            .collect(),
+                    ))
+                },
+                _ => Err("Malformed payload for the ConfigChangesDropped Event"),
+            },
             Some(ProtobufEventType::NestedSessionEnded) => match protobuf_event.payload {
                 Some(ProtobufEventPayload::NestedSessionEndedPayload(payload)) => {
                     let pane_id = payload
@@ -867,6 +1017,16 @@ impl TryFrom<Event> for ProtobufEvent {
             }),
             Event::Mouse(mouse_event) => {
                 let protobuf_mouse_payload = mouse_event.try_into()?;
+                Ok(ProtobufEvent {
+                    name: ProtobufEventType::Mouse as i32,
+                    payload: Some(event::Payload::MouseEventPayload(protobuf_mouse_payload)),
+                })
+            },
+            Event::MouseWithModifiers(mouse_event, modifiers) => {
+                let mut protobuf_mouse_payload: MouseEventPayload = mouse_event.try_into()?;
+                protobuf_mouse_payload.shift = modifiers.contains(&KeyModifier::Shift);
+                protobuf_mouse_payload.ctrl = modifiers.contains(&KeyModifier::Ctrl);
+                protobuf_mouse_payload.alt = modifiers.contains(&KeyModifier::Alt);
                 Ok(ProtobufEvent {
                     name: ProtobufEventType::Mouse as i32,
                     payload: Some(event::Payload::MouseEventPayload(protobuf_mouse_payload)),
@@ -1158,6 +1318,47 @@ impl TryFrom<Event> for ProtobufEvent {
                 name: ProtobufEventType::ConfigWasWrittenToDisk as i32,
                 payload: None,
             }),
+            Event::ConfigFileChangedSinceRead => Ok(ProtobufEvent {
+                name: ProtobufEventType::ConfigFileChangedSinceRead as i32,
+                payload: None,
+            }),
+            Event::SessionSuggestions(suggestions) => Ok(ProtobufEvent {
+                name: ProtobufEventType::SessionSuggestions as i32,
+                payload: Some(event::Payload::SessionSuggestionsPayload(
+                    suggestions.into(),
+                )),
+            }),
+            Event::SessionCountsUpdate(counts) => Ok(ProtobufEvent {
+                name: ProtobufEventType::SessionCountsUpdate as i32,
+                payload: Some(event::Payload::SessionCountsUpdatePayload(counts.into())),
+            }),
+            Event::FolderSessionsUpdate(folder_sessions) => Ok(ProtobufEvent {
+                name: ProtobufEventType::FolderSessionsUpdate as i32,
+                payload: Some(event::Payload::FolderSessionsUpdatePayload(
+                    folder_sessions.into(),
+                )),
+            }),
+            Event::TerminalCommandSubmitted => Ok(ProtobufEvent {
+                name: ProtobufEventType::TerminalCommandSubmitted as i32,
+                payload: None,
+            }),
+            Event::SessionPreview(preview) => Ok(ProtobufEvent {
+                name: ProtobufEventType::SessionPreview as i32,
+                payload: Some(event::Payload::SessionPreviewPayload(preview.into())),
+            }),
+            Event::SavedSessionPreview(preview) => Ok(ProtobufEvent {
+                name: ProtobufEventType::SavedSessionPreview as i32,
+                payload: Some(event::Payload::SavedSessionPreviewPayload(preview.into())),
+            }),
+            Event::PromptResult(request_id, result) => Ok(ProtobufEvent {
+                name: ProtobufEventType::PromptResult as i32,
+                payload: Some(event::Payload::PromptResultPayload(
+                    ProtobufPromptResultPayload {
+                        request_id,
+                        result: Some(result.into()),
+                    },
+                )),
+            }),
             Event::WebServerStatus(web_server_status) => Ok(ProtobufEvent {
                 name: ProtobufEventType::WebServerStatus as i32,
                 payload: Some(event::Payload::WebServerStatusPayload(
@@ -1401,6 +1602,75 @@ impl TryFrom<Event> for ProtobufEvent {
                     )),
                 })
             },
+            Event::ContextMenu(context, entries) => {
+                let kind = match context.kind {
+                    ContextMenuKind::Pane => ProtobufContextMenuKind::Pane,
+                    ContextMenuKind::PaneFrame => ProtobufContextMenuKind::PaneFrame,
+                    ContextMenuKind::Tab => ProtobufContextMenuKind::Tab,
+                    ContextMenuKind::Bar => ProtobufContextMenuKind::Bar,
+                };
+                let pane_id = match context.pane_id {
+                    Some(pane_id) => Some(pane_id.try_into()?),
+                    None => None,
+                };
+                let mut protobuf_entries = vec![];
+                for entry in entries {
+                    match entry {
+                        ContextMenuEntry::Separator => {
+                            protobuf_entries.push(ProtobufContextMenuEntry {
+                                is_separator: true,
+                                label: String::new(),
+                                actions: vec![],
+                            });
+                        },
+                        ContextMenuEntry::Item { label, actions } => {
+                            let mut protobuf_actions = vec![];
+                            for action in actions {
+                                protobuf_actions.push(ProtobufContextMenuAction::try_from(action)?);
+                            }
+                            protobuf_entries.push(ProtobufContextMenuEntry {
+                                is_separator: false,
+                                label,
+                                actions: protobuf_actions,
+                            });
+                        },
+                    }
+                }
+                Ok(ProtobufEvent {
+                    name: ProtobufEventType::ContextMenu as i32,
+                    payload: Some(event::Payload::ContextMenuPayload(
+                        ProtobufContextMenuPayload {
+                            kind: kind as i32,
+                            pane_id,
+                            pane_is_floating: context.pane_is_floating,
+                            tab_index: context.tab_index.map(|t| t as u32),
+                            tab_id: context.tab_id.map(|t| t as u32),
+                            tab_count: context.tab_count as u32,
+                            line: context.line as u32,
+                            column: context.column as u32,
+                            client_id: context.client_id as u32,
+                            entries: protobuf_entries,
+                        },
+                    )),
+                })
+            },
+            Event::AvailableKeybindPresets(presets, errors) => Ok(ProtobufEvent {
+                name: ProtobufEventType::AvailableKeybindPresets as i32,
+                payload: Some(event::Payload::AvailableKeybindPresetsPayload(
+                    ProtobufAvailableKeybindPresetsPayload {
+                        presets: presets.into_iter().map(Into::into).collect(),
+                        presets_with_errors: errors.into_iter().map(Into::into).collect(),
+                    },
+                )),
+            }),
+            Event::ConfigChangesDropped(keys) => Ok(ProtobufEvent {
+                name: ProtobufEventType::ConfigChangesDropped as i32,
+                payload: Some(event::Payload::ConfigChangesDroppedPayload(
+                    ConfigChangesDroppedPayload {
+                        keys: keys.iter().map(|key| key.id()).collect(),
+                    },
+                )),
+            }),
             Event::InitialKeybinds(keybinds) => {
                 let protobuf_keybinds = keybinds_to_protobuf(keybinds);
                 Ok(ProtobufEvent {
@@ -1843,6 +2113,22 @@ impl TryFrom<MouseEventPayload> for Mouse {
                     _ => Err("Malformed payload for mouse scroll down"),
                 }
             },
+            Some(MouseEventName::MouseScrollLeft) => {
+                match mouse_event_payload.mouse_event_payload {
+                    Some(mouse_event_payload::MouseEventPayload::LineCount(line_count)) => {
+                        Ok(Mouse::ScrollLeft(line_count as usize))
+                    },
+                    _ => Err("Malformed payload for mouse scroll left"),
+                }
+            },
+            Some(MouseEventName::MouseScrollRight) => {
+                match mouse_event_payload.mouse_event_payload {
+                    Some(mouse_event_payload::MouseEventPayload::LineCount(line_count)) => {
+                        Ok(Mouse::ScrollRight(line_count as usize))
+                    },
+                    _ => Err("Malformed payload for mouse scroll right"),
+                }
+            },
             Some(MouseEventName::MouseLeftClick) => match mouse_event_payload.mouse_event_payload {
                 Some(mouse_event_payload::MouseEventPayload::Position(position)) => Ok(
                     Mouse::LeftClick(position.line as isize, position.column as usize),
@@ -1875,20 +2161,12 @@ impl TryFrom<MouseEventPayload> for Mouse {
                 ),
                 _ => Err("Malformed payload for mouse hover"),
             },
-            Some(MouseEventName::MouseScrollLeft) => {
+            Some(MouseEventName::MouseDoubleClick) => {
                 match mouse_event_payload.mouse_event_payload {
-                    Some(mouse_event_payload::MouseEventPayload::LineCount(line_count)) => {
-                        Ok(Mouse::ScrollLeft(line_count as usize))
-                    },
-                    _ => Err("Malformed payload for mouse scroll left"),
-                }
-            },
-            Some(MouseEventName::MouseScrollRight) => {
-                match mouse_event_payload.mouse_event_payload {
-                    Some(mouse_event_payload::MouseEventPayload::LineCount(line_count)) => {
-                        Ok(Mouse::ScrollRight(line_count as usize))
-                    },
-                    _ => Err("Malformed payload for mouse scroll right"),
+                    Some(mouse_event_payload::MouseEventPayload::Position(position)) => Ok(
+                        Mouse::DoubleClick(position.line as isize, position.column as usize),
+                    ),
+                    _ => Err("Malformed payload for mouse double click"),
                 }
             },
             None => Err("Malformed payload for MouseEventName"),
@@ -1905,12 +2183,28 @@ impl TryFrom<Mouse> for MouseEventPayload {
                 mouse_event_payload: Some(mouse_event_payload::MouseEventPayload::LineCount(
                     number_of_lines as u32,
                 )),
+                ..Default::default()
             }),
             Mouse::ScrollDown(number_of_lines) => Ok(MouseEventPayload {
                 mouse_event_name: MouseEventName::MouseScrollDown as i32,
                 mouse_event_payload: Some(mouse_event_payload::MouseEventPayload::LineCount(
                     number_of_lines as u32,
                 )),
+                ..Default::default()
+            }),
+            Mouse::ScrollLeft(cols) => Ok(MouseEventPayload {
+                mouse_event_name: MouseEventName::MouseScrollLeft as i32,
+                mouse_event_payload: Some(mouse_event_payload::MouseEventPayload::LineCount(
+                    cols as u32,
+                )),
+                ..Default::default()
+            }),
+            Mouse::ScrollRight(cols) => Ok(MouseEventPayload {
+                mouse_event_name: MouseEventName::MouseScrollRight as i32,
+                mouse_event_payload: Some(mouse_event_payload::MouseEventPayload::LineCount(
+                    cols as u32,
+                )),
+                ..Default::default()
             }),
             Mouse::LeftClick(line, column) => Ok(MouseEventPayload {
                 mouse_event_name: MouseEventName::MouseLeftClick as i32,
@@ -1920,6 +2214,7 @@ impl TryFrom<Mouse> for MouseEventPayload {
                         column: column as i64,
                     },
                 )),
+                ..Default::default()
             }),
             Mouse::RightClick(line, column) => Ok(MouseEventPayload {
                 mouse_event_name: MouseEventName::MouseRightClick as i32,
@@ -1929,6 +2224,7 @@ impl TryFrom<Mouse> for MouseEventPayload {
                         column: column as i64,
                     },
                 )),
+                ..Default::default()
             }),
             Mouse::Hold(line, column) => Ok(MouseEventPayload {
                 mouse_event_name: MouseEventName::MouseHold as i32,
@@ -1938,6 +2234,7 @@ impl TryFrom<Mouse> for MouseEventPayload {
                         column: column as i64,
                     },
                 )),
+                ..Default::default()
             }),
             Mouse::Release(line, column) => Ok(MouseEventPayload {
                 mouse_event_name: MouseEventName::MouseRelease as i32,
@@ -1947,6 +2244,7 @@ impl TryFrom<Mouse> for MouseEventPayload {
                         column: column as i64,
                     },
                 )),
+                ..Default::default()
             }),
             Mouse::Hover(line, column) => Ok(MouseEventPayload {
                 mouse_event_name: MouseEventName::MouseHover as i32,
@@ -1956,18 +2254,17 @@ impl TryFrom<Mouse> for MouseEventPayload {
                         column: column as i64,
                     },
                 )),
+                ..Default::default()
             }),
-            Mouse::ScrollLeft(cols) => Ok(MouseEventPayload {
-                mouse_event_name: MouseEventName::MouseScrollLeft as i32,
-                mouse_event_payload: Some(mouse_event_payload::MouseEventPayload::LineCount(
-                    cols as u32,
+            Mouse::DoubleClick(line, column) => Ok(MouseEventPayload {
+                mouse_event_name: MouseEventName::MouseDoubleClick as i32,
+                mouse_event_payload: Some(mouse_event_payload::MouseEventPayload::Position(
+                    ProtobufPosition {
+                        line: line as i64,
+                        column: column as i64,
+                    },
                 )),
-            }),
-            Mouse::ScrollRight(cols) => Ok(MouseEventPayload {
-                mouse_event_name: MouseEventName::MouseScrollRight as i32,
-                mouse_event_payload: Some(mouse_event_payload::MouseEventPayload::LineCount(
-                    cols as u32,
-                )),
+                ..Default::default()
             }),
         }
     }
@@ -1983,6 +2280,7 @@ impl TryFrom<ProtobufPaneInfo> for PaneInfo {
             is_fullscreen: protobuf_pane_info.is_fullscreen,
             is_floating: protobuf_pane_info.is_floating,
             is_suppressed: protobuf_pane_info.is_suppressed,
+            is_collapsed: protobuf_pane_info.is_collapsed,
             title: protobuf_pane_info.title,
             exited: protobuf_pane_info.exited,
             exit_status: protobuf_pane_info.exit_status,
@@ -2028,6 +2326,7 @@ impl TryFrom<PaneInfo> for ProtobufPaneInfo {
             is_fullscreen: pane_info.is_fullscreen,
             is_floating: pane_info.is_floating,
             is_suppressed: pane_info.is_suppressed,
+            is_collapsed: pane_info.is_collapsed,
             title: pane_info.title,
             exited: pane_info.exited,
             exit_status: pane_info.exit_status,
@@ -2388,6 +2687,17 @@ impl TryFrom<ProtobufEventType> for EventType {
             ProtobufEventType::ActivePaneScroll => EventType::ActivePaneScroll,
             ProtobufEventType::NestedSessionModeUpdate => EventType::NestedSessionModeUpdate,
             ProtobufEventType::NestedSessionEnded => EventType::NestedSessionEnded,
+            ProtobufEventType::ContextMenu => EventType::ContextMenu,
+            ProtobufEventType::ConfigChangesDropped => EventType::ConfigChangesDropped,
+            ProtobufEventType::AvailableKeybindPresets => EventType::AvailableKeybindPresets,
+            ProtobufEventType::ConfigFileChangedSinceRead => EventType::ConfigFileChangedSinceRead,
+            ProtobufEventType::PromptResult => EventType::PromptResult,
+            ProtobufEventType::SessionSuggestions => EventType::SessionSuggestions,
+            ProtobufEventType::SessionCountsUpdate => EventType::SessionCountsUpdate,
+            ProtobufEventType::FolderSessionsUpdate => EventType::FolderSessionsUpdate,
+            ProtobufEventType::TerminalCommandSubmitted => EventType::TerminalCommandSubmitted,
+            ProtobufEventType::SessionPreview => EventType::SessionPreview,
+            ProtobufEventType::SavedSessionPreview => EventType::SavedSessionPreview,
         })
     }
 }
@@ -2400,7 +2710,7 @@ impl TryFrom<EventType> for ProtobufEventType {
             EventType::TabUpdate => ProtobufEventType::TabUpdate,
             EventType::PaneUpdate => ProtobufEventType::PaneUpdate,
             EventType::Key => ProtobufEventType::Key,
-            EventType::Mouse => ProtobufEventType::Mouse,
+            EventType::Mouse | EventType::MouseWithModifiers => ProtobufEventType::Mouse,
             EventType::Timer => ProtobufEventType::Timer,
             EventType::CopyToClipboard => ProtobufEventType::CopyToClipboard,
             EventType::SystemClipboardFailure => ProtobufEventType::SystemClipboardFailure,
@@ -2448,6 +2758,17 @@ impl TryFrom<EventType> for ProtobufEventType {
             EventType::ActivePaneScroll => ProtobufEventType::ActivePaneScroll,
             EventType::NestedSessionModeUpdate => ProtobufEventType::NestedSessionModeUpdate,
             EventType::NestedSessionEnded => ProtobufEventType::NestedSessionEnded,
+            EventType::ContextMenu => ProtobufEventType::ContextMenu,
+            EventType::ConfigChangesDropped => ProtobufEventType::ConfigChangesDropped,
+            EventType::AvailableKeybindPresets => ProtobufEventType::AvailableKeybindPresets,
+            EventType::ConfigFileChangedSinceRead => ProtobufEventType::ConfigFileChangedSinceRead,
+            EventType::PromptResult => ProtobufEventType::PromptResult,
+            EventType::SessionSuggestions => ProtobufEventType::SessionSuggestions,
+            EventType::SessionCountsUpdate => ProtobufEventType::SessionCountsUpdate,
+            EventType::FolderSessionsUpdate => ProtobufEventType::FolderSessionsUpdate,
+            EventType::TerminalCommandSubmitted => ProtobufEventType::TerminalCommandSubmitted,
+            EventType::SessionPreview => ProtobufEventType::SessionPreview,
+            EventType::SavedSessionPreview => ProtobufEventType::SavedSessionPreview,
         })
     }
 }
@@ -3110,6 +3431,7 @@ fn serialize_session_update_event_with_non_default_values() {
             is_fullscreen: true,
             is_floating: false,
             is_suppressed: false,
+            is_collapsed: false,
             title: "pane 1".to_owned(),
             exited: false,
             exit_status: None,
@@ -3138,6 +3460,7 @@ fn serialize_session_update_event_with_non_default_values() {
             is_fullscreen: true,
             is_floating: false,
             is_suppressed: false,
+            is_collapsed: true,
             title: "pane 1".to_owned(),
             exited: false,
             exit_status: None,
@@ -3837,5 +4160,734 @@ fn event_from_protobuf_bytes_matches_full_decoding() {
             .try_into()
             .unwrap();
         assert_eq!(event_from_protobuf_bytes(&bytes).unwrap(), fully_decoded);
+    }
+}
+impl From<KeybindPresetInfo> for ProtobufKeybindPresetInfo {
+    fn from(info: KeybindPresetInfo) -> Self {
+        ProtobufKeybindPresetInfo {
+            name: info.name,
+            display_name: info.display_name,
+            description: info.description,
+            source: match info.source {
+                KeybindPresetSource::BuiltIn => ProtobufKeybindPresetSource::BuiltIn,
+                KeybindPresetSource::Folder => ProtobufKeybindPresetSource::Folder,
+                KeybindPresetSource::File => ProtobufKeybindPresetSource::File,
+            } as i32,
+            placeholders: info.placeholders,
+            path: info.path,
+            examples: info
+                .examples
+                .into_iter()
+                .map(|(keys, text)| ProtobufKeybindPresetExample { keys, text })
+                .collect(),
+        }
+    }
+}
+
+impl From<ProtobufKeybindPresetInfo> for KeybindPresetInfo {
+    fn from(info: ProtobufKeybindPresetInfo) -> Self {
+        let source = match ProtobufKeybindPresetSource::try_from(info.source).ok() {
+            Some(ProtobufKeybindPresetSource::Folder) => KeybindPresetSource::Folder,
+            Some(ProtobufKeybindPresetSource::File) => KeybindPresetSource::File,
+            _ => KeybindPresetSource::BuiltIn,
+        };
+        KeybindPresetInfo {
+            name: info.name,
+            display_name: info.display_name,
+            description: info.description,
+            source,
+            placeholders: info.placeholders,
+            path: info.path,
+            examples: info
+                .examples
+                .into_iter()
+                .map(|example| (example.keys, example.text))
+                .collect(),
+        }
+    }
+}
+
+impl From<KeybindPresetWithError> for ProtobufKeybindPresetWithError {
+    fn from(preset: KeybindPresetWithError) -> Self {
+        ProtobufKeybindPresetWithError {
+            name: preset.name,
+            path: preset.path,
+            error: preset.error,
+        }
+    }
+}
+
+impl From<ProtobufKeybindPresetWithError> for KeybindPresetWithError {
+    fn from(preset: ProtobufKeybindPresetWithError) -> Self {
+        KeybindPresetWithError {
+            name: preset.name,
+            path: preset.path,
+            error: preset.error,
+        }
+    }
+}
+
+#[test]
+fn a_mouse_event_with_modifiers_keeps_them_across_the_plugin_boundary() {
+    use prost::Message;
+    let modifiers: std::collections::BTreeSet<KeyModifier> =
+        [KeyModifier::Shift, KeyModifier::Ctrl]
+            .into_iter()
+            .collect();
+    let event = Event::MouseWithModifiers(crate::data::Mouse::LeftClick(2, 5), modifiers.clone());
+    let protobuf_event: ProtobufEvent = event.try_into().unwrap();
+    let decoded: ProtobufEvent =
+        Message::decode(protobuf_event.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(mouse_modifiers(&decoded), modifiers);
+    let plain: Event = decoded.try_into().unwrap();
+    assert_eq!(plain, Event::Mouse(crate::data::Mouse::LeftClick(2, 5)));
+}
+
+#[test]
+fn serialize_prompt_result_event() {
+    use crate::prompt::{PromptResult, PromptValue};
+    use prost::Message;
+    for result in [
+        PromptResult::Confirmed(true),
+        PromptResult::Answered(PromptValue::Choices(vec!["a".to_owned()])),
+        PromptResult::Cancelled,
+        PromptResult::TimedOut(None),
+        PromptResult::Error("bad".to_owned()),
+    ] {
+        let event = Event::PromptResult(9, result);
+        let protobuf_event: ProtobufEvent = event.clone().try_into().unwrap();
+        let decoded: ProtobufEvent =
+            Message::decode(protobuf_event.encode_to_vec().as_slice()).unwrap();
+        let decoded_event: Event = decoded.try_into().unwrap();
+        assert_eq!(event, decoded_event);
+    }
+    let event_type: ProtobufEventType = EventType::PromptResult.try_into().unwrap();
+    assert_eq!(EventType::try_from(event_type), Ok(EventType::PromptResult));
+}
+
+impl TryFrom<ProtobufContextMenuAction> for ContextMenuAction {
+    type Error = &'static str;
+    fn try_from(protobuf_action: ProtobufContextMenuAction) -> Result<Self, &'static str> {
+        match protobuf_action.action {
+            Some(ProtobufContextMenuActionKind::Plain(action)) => {
+                Ok(ContextMenuAction::Action(Action::try_from(action)?))
+            },
+            Some(ProtobufContextMenuActionKind::ClickedPane(action)) => {
+                let action = match ProtobufClickedPaneAction::try_from(action) {
+                    Ok(ProtobufClickedPaneAction::CloseFocus) => ClickedPaneAction::CloseFocus,
+                    Ok(ProtobufClickedPaneAction::ToggleFocusFullscreen) => {
+                        ClickedPaneAction::ToggleFocusFullscreen
+                    },
+                    Ok(ProtobufClickedPaneAction::ToggleEmbedOrFloating) => {
+                        ClickedPaneAction::ToggleEmbedOrFloating
+                    },
+                    Ok(ProtobufClickedPaneAction::TogglePinned) => ClickedPaneAction::TogglePinned,
+                    Ok(ProtobufClickedPaneAction::ToggleInGroup) => {
+                        ClickedPaneAction::ToggleInGroup
+                    },
+                    Ok(ProtobufClickedPaneAction::StartRename) => ClickedPaneAction::StartRename,
+                    Err(_) => return Err("Unknown clicked pane action in a context menu entry"),
+                };
+                Ok(ContextMenuAction::ClickedPane(action))
+            },
+            Some(ProtobufContextMenuActionKind::ClickedTab(action)) => {
+                let action = match ProtobufClickedTabAction::try_from(action) {
+                    Ok(ProtobufClickedTabAction::Close) => ClickedTabAction::Close,
+                    Ok(ProtobufClickedTabAction::StartRename) => ClickedTabAction::StartRename,
+                    Ok(ProtobufClickedTabAction::MoveLeft) => {
+                        ClickedTabAction::Move(Direction::Left)
+                    },
+                    Ok(ProtobufClickedTabAction::MoveRight) => {
+                        ClickedTabAction::Move(Direction::Right)
+                    },
+                    Err(_) => return Err("Unknown clicked tab action in a context menu entry"),
+                };
+                Ok(ContextMenuAction::ClickedTab(action))
+            },
+            Some(ProtobufContextMenuActionKind::ClickedTabMoveToPosition(position)) => Ok(
+                ContextMenuAction::ClickedTab(ClickedTabAction::MoveToPosition(position)),
+            ),
+            None => Err("Empty action in a context menu entry"),
+        }
+    }
+}
+
+impl TryFrom<ContextMenuAction> for ProtobufContextMenuAction {
+    type Error = &'static str;
+    fn try_from(action: ContextMenuAction) -> Result<Self, &'static str> {
+        let action = match action {
+            ContextMenuAction::Action(action) => {
+                ProtobufContextMenuActionKind::Plain(ProtobufAction::try_from(action)?)
+            },
+            ContextMenuAction::ClickedPane(action) => {
+                let action = match action {
+                    ClickedPaneAction::CloseFocus => ProtobufClickedPaneAction::CloseFocus,
+                    ClickedPaneAction::ToggleFocusFullscreen => {
+                        ProtobufClickedPaneAction::ToggleFocusFullscreen
+                    },
+                    ClickedPaneAction::ToggleEmbedOrFloating => {
+                        ProtobufClickedPaneAction::ToggleEmbedOrFloating
+                    },
+                    ClickedPaneAction::TogglePinned => ProtobufClickedPaneAction::TogglePinned,
+                    ClickedPaneAction::ToggleInGroup => ProtobufClickedPaneAction::ToggleInGroup,
+                    ClickedPaneAction::StartRename => ProtobufClickedPaneAction::StartRename,
+                };
+                ProtobufContextMenuActionKind::ClickedPane(action as i32)
+            },
+            ContextMenuAction::ClickedTab(ClickedTabAction::MoveToPosition(position)) => {
+                ProtobufContextMenuActionKind::ClickedTabMoveToPosition(position)
+            },
+            ContextMenuAction::ClickedTab(action) => {
+                let action = match action {
+                    ClickedTabAction::Close => ProtobufClickedTabAction::Close,
+                    ClickedTabAction::StartRename => ProtobufClickedTabAction::StartRename,
+                    ClickedTabAction::Move(Direction::Left) => ProtobufClickedTabAction::MoveLeft,
+                    ClickedTabAction::Move(Direction::Right) => ProtobufClickedTabAction::MoveRight,
+                    ClickedTabAction::Move(_) => {
+                        return Err("Tabs can only be moved left or right")
+                    },
+                    ClickedTabAction::MoveToPosition(_) => {
+                        return Err("Unexpected clicked tab action")
+                    },
+                };
+                ProtobufContextMenuActionKind::ClickedTab(action as i32)
+            },
+        };
+        Ok(ProtobufContextMenuAction {
+            action: Some(action),
+        })
+    }
+}
+
+#[cfg(test)]
+mod mouse_event_tests {
+    use super::*;
+
+    #[test]
+    fn every_mouse_event_survives_the_protobuf_round_trip() {
+        let events = [
+            Mouse::ScrollUp(3),
+            Mouse::ScrollDown(2),
+            Mouse::ScrollLeft(4),
+            Mouse::ScrollRight(5),
+            Mouse::LeftClick(1, 2),
+            Mouse::RightClick(3, 4),
+            Mouse::Hold(5, 6),
+            Mouse::Release(7, 8),
+            Mouse::Hover(9, 10),
+            Mouse::DoubleClick(11, 12),
+        ];
+        for event in events {
+            let payload: MouseEventPayload = event.try_into().expect("encode");
+            let decoded: Mouse = payload.try_into().expect("decode");
+            assert_eq!(decoded, event);
+        }
+    }
+}
+
+#[cfg(test)]
+mod context_menu_tests {
+    use super::*;
+
+    fn every_context_menu_action() -> Vec<ContextMenuAction> {
+        let mut actions: Vec<ContextMenuAction> = ClickedPaneAction::ALL
+            .into_iter()
+            .map(ContextMenuAction::ClickedPane)
+            .collect();
+        actions.extend([
+            ContextMenuAction::ClickedTab(ClickedTabAction::Close),
+            ContextMenuAction::ClickedTab(ClickedTabAction::StartRename),
+            ContextMenuAction::ClickedTab(ClickedTabAction::Move(Direction::Left)),
+            ContextMenuAction::ClickedTab(ClickedTabAction::Move(Direction::Right)),
+            ContextMenuAction::ClickedTab(ClickedTabAction::MoveToPosition(0)),
+            ContextMenuAction::ClickedTab(ClickedTabAction::MoveToPosition(
+                crate::data::TAB_POSITION_END,
+            )),
+            ContextMenuAction::Action(Action::MoveTabToPosition { id: 4, position: 2 }),
+            ContextMenuAction::Action(Action::Detach),
+            ContextMenuAction::Action(Action::CloseFocusByPaneId {
+                pane_id: PaneId::Terminal(3),
+            }),
+            ContextMenuAction::Action(Action::MoveTabByTabId {
+                id: 2,
+                direction: Direction::Right,
+            }),
+        ]);
+        actions
+    }
+
+    #[test]
+    fn every_context_menu_action_survives_protobuf() {
+        for original in every_context_menu_action() {
+            let protobuf = ProtobufContextMenuAction::try_from(original.clone())
+                .unwrap_or_else(|e| panic!("{:?} did not encode: {}", original, e));
+            let decoded = ContextMenuAction::try_from(protobuf)
+                .unwrap_or_else(|e| panic!("{:?} did not decode: {}", original, e));
+            assert_eq!(original, decoded);
+        }
+    }
+
+    #[test]
+    fn tabs_only_move_left_or_right_and_empty_actions_are_rejected() {
+        for direction in [Direction::Up, Direction::Down] {
+            assert!(
+                ProtobufContextMenuAction::try_from(ContextMenuAction::ClickedTab(
+                    ClickedTabAction::Move(direction)
+                ))
+                .is_err()
+            );
+        }
+        assert!(ContextMenuAction::try_from(ProtobufContextMenuAction { action: None }).is_err());
+        assert!(ContextMenuAction::try_from(ProtobufContextMenuAction {
+            action: Some(ProtobufContextMenuActionKind::ClickedPane(99)),
+        })
+        .is_err());
+        assert!(ContextMenuAction::try_from(ProtobufContextMenuAction {
+            action: Some(ProtobufContextMenuActionKind::ClickedTab(99)),
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn a_context_menu_event_keeps_its_items_and_their_targets() {
+        let context = ContextMenuContext {
+            kind: ContextMenuKind::Tab,
+            pane_id: None,
+            pane_is_floating: false,
+            tab_index: Some(1),
+            tab_id: Some(4),
+            tab_count: 3,
+            line: 2,
+            column: 7,
+            client_id: 1,
+        };
+        let entries = vec![
+            ContextMenuEntry::item(
+                "Close tab",
+                vec![ContextMenuAction::ClickedTab(ClickedTabAction::Close)],
+            ),
+            ContextMenuEntry::Separator,
+            ContextMenuEntry::item("Everything", every_context_menu_action()),
+        ];
+        let original = Event::ContextMenu(context, entries);
+        let protobuf = ProtobufEvent::try_from(original.clone()).unwrap();
+        let decoded = Event::try_from(protobuf).unwrap();
+        assert_eq!(original, decoded);
+    }
+}
+
+mod session_suggestion_conversions {
+    use crate::data::{
+        FolderRelation, FolderSessions, SavedPanePreview, SavedSessionPreview, SavedTabPreview,
+        SessionCounts, SessionPreview, SessionSuggestion, SessionSuggestionColumn,
+        SessionSuggestions,
+    };
+    use crate::plugin_api::generated_api::api::event as pb;
+
+    fn folder_relation_to_i32(relation: FolderRelation) -> i32 {
+        match relation {
+            FolderRelation::Other => pb::FolderRelation::Other as i32,
+            FolderRelation::Here => pb::FolderRelation::Here as i32,
+            FolderRelation::Subfolder => pb::FolderRelation::Subfolder as i32,
+        }
+    }
+
+    fn folder_relation_from_i32(value: i32) -> FolderRelation {
+        match pb::FolderRelation::try_from(value) {
+            Ok(pb::FolderRelation::Here) => FolderRelation::Here,
+            Ok(pb::FolderRelation::Subfolder) => FolderRelation::Subfolder,
+            _ => FolderRelation::Other,
+        }
+    }
+
+    impl From<SessionSuggestion> for pb::SessionSuggestionItem {
+        fn from(s: SessionSuggestion) -> Self {
+            pb::SessionSuggestionItem {
+                name: s.name,
+                is_running: s.is_running,
+                last_used_secs_ago: s.last_used_secs_ago,
+                created_secs_ago: s.created_secs_ago,
+                folder: s.folder,
+                folder_relation: folder_relation_to_i32(s.folder_relation),
+                repo: s.repo,
+                branch: s.branch,
+                facts: s
+                    .facts
+                    .into_iter()
+                    .map(|(name, value)| pb::ContextItem { name, value })
+                    .collect(),
+                tier: s.tier,
+                matching_columns: s.matching_columns,
+                script_label: s.script_label,
+                tabs: s.tabs.into_iter().map(preview_tab_to_pb).collect(),
+                connected_clients: s.connected_clients as u32,
+            }
+        }
+    }
+
+    fn preview_tab_to_pb(tab: crate::data::SessionPreviewTab) -> pb::SessionPreviewTab {
+        pb::SessionPreviewTab {
+            name: tab.name,
+            active: tab.active,
+            panes: tab
+                .panes
+                .into_iter()
+                .map(|pane| pb::SessionPreviewPane {
+                    id: pane.id,
+                    is_plugin: pane.is_plugin,
+                    title: pane.title,
+                    focused: pane.focused,
+                    contents: pane.contents,
+                })
+                .collect(),
+        }
+    }
+
+    fn preview_tab_from_pb(tab: pb::SessionPreviewTab) -> crate::data::SessionPreviewTab {
+        crate::data::SessionPreviewTab {
+            name: tab.name,
+            active: tab.active,
+            panes: tab
+                .panes
+                .into_iter()
+                .map(|pane| crate::data::SessionPreviewPane {
+                    id: pane.id,
+                    is_plugin: pane.is_plugin,
+                    title: pane.title,
+                    focused: pane.focused,
+                    contents: pane.contents,
+                })
+                .collect(),
+        }
+    }
+
+    impl From<pb::SessionSuggestionItem> for SessionSuggestion {
+        fn from(s: pb::SessionSuggestionItem) -> Self {
+            SessionSuggestion {
+                name: s.name,
+                is_running: s.is_running,
+                last_used_secs_ago: s.last_used_secs_ago,
+                created_secs_ago: s.created_secs_ago,
+                folder: s.folder,
+                folder_relation: folder_relation_from_i32(s.folder_relation),
+                repo: s.repo,
+                branch: s.branch,
+                facts: s.facts.into_iter().map(|c| (c.name, c.value)).collect(),
+                tier: s.tier,
+                matching_columns: s.matching_columns,
+                script_label: s.script_label,
+                tabs: s.tabs.into_iter().map(preview_tab_from_pb).collect(),
+                connected_clients: s.connected_clients as usize,
+            }
+        }
+    }
+
+    impl From<SessionSuggestions> for pb::SessionSuggestionsPayload {
+        fn from(s: SessionSuggestions) -> Self {
+            pb::SessionSuggestionsPayload {
+                folder: s.folder,
+                branch: s.branch,
+                columns: s
+                    .columns
+                    .into_iter()
+                    .map(|c| pb::SessionSuggestionColumn {
+                        fact: c.fact,
+                        title: c.title,
+                    })
+                    .collect(),
+                suggestions: s.suggestions.into_iter().map(Into::into).collect(),
+                command_submitted: s.command_submitted,
+                from_script: s.from_script,
+            }
+        }
+    }
+
+    impl From<pb::SessionSuggestionsPayload> for SessionSuggestions {
+        fn from(s: pb::SessionSuggestionsPayload) -> Self {
+            SessionSuggestions {
+                folder: s.folder,
+                branch: s.branch,
+                columns: s
+                    .columns
+                    .into_iter()
+                    .map(|c| SessionSuggestionColumn {
+                        fact: c.fact,
+                        title: c.title,
+                    })
+                    .collect(),
+                suggestions: s.suggestions.into_iter().map(Into::into).collect(),
+                command_submitted: s.command_submitted,
+                from_script: s.from_script,
+            }
+        }
+    }
+
+    impl From<SessionCounts> for pb::SessionCountsUpdatePayload {
+        fn from(c: SessionCounts) -> Self {
+            pb::SessionCountsUpdatePayload {
+                running: c.running,
+                resumable_matching: c.resumable_matching,
+            }
+        }
+    }
+
+    impl From<pb::SessionCountsUpdatePayload> for SessionCounts {
+        fn from(c: pb::SessionCountsUpdatePayload) -> Self {
+            SessionCounts {
+                running: c.running,
+                resumable_matching: c.resumable_matching,
+            }
+        }
+    }
+
+    impl From<FolderSessions> for pb::FolderSessionsUpdatePayload {
+        fn from(f: FolderSessions) -> Self {
+            pb::FolderSessionsUpdatePayload {
+                folder: f.folder,
+                running: f.running,
+                resumable: f.resumable,
+                full_match_running: f.full_match_running,
+            }
+        }
+    }
+
+    impl From<pb::FolderSessionsUpdatePayload> for FolderSessions {
+        fn from(f: pb::FolderSessionsUpdatePayload) -> Self {
+            FolderSessions {
+                folder: f.folder,
+                running: f.running,
+                resumable: f.resumable,
+                full_match_running: f.full_match_running,
+            }
+        }
+    }
+
+    impl From<SessionPreview> for pb::SessionPreviewPayload {
+        fn from(p: SessionPreview) -> Self {
+            pb::SessionPreviewPayload {
+                session_name: p.session_name,
+                tab_index: p.tab_index.map(|i| i as u32),
+                tab_names: p.tab_names,
+                contents: p.contents,
+                error: p.error,
+                active_tab_index: p.active_tab_index.map(|i| i as u32),
+                pane_count: p.pane_count as u32,
+                connected_clients: p.connected_clients as u32,
+                tabs: p
+                    .tabs
+                    .into_iter()
+                    .map(|tab| pb::SessionPreviewTab {
+                        name: tab.name,
+                        active: tab.active,
+                        panes: tab
+                            .panes
+                            .into_iter()
+                            .map(|pane| pb::SessionPreviewPane {
+                                id: pane.id,
+                                is_plugin: pane.is_plugin,
+                                title: pane.title,
+                                focused: pane.focused,
+                                contents: pane.contents,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    impl From<pb::SessionPreviewPayload> for SessionPreview {
+        fn from(p: pb::SessionPreviewPayload) -> Self {
+            SessionPreview {
+                session_name: p.session_name,
+                tab_index: p.tab_index.map(|i| i as usize),
+                active_tab_index: p.active_tab_index.map(|i| i as usize),
+                tab_names: p.tab_names,
+                contents: p.contents,
+                pane_count: p.pane_count as usize,
+                connected_clients: p.connected_clients as usize,
+                error: p.error,
+                tabs: p
+                    .tabs
+                    .into_iter()
+                    .map(|tab| crate::data::SessionPreviewTab {
+                        name: tab.name,
+                        active: tab.active,
+                        panes: tab
+                            .panes
+                            .into_iter()
+                            .map(|pane| crate::data::SessionPreviewPane {
+                                id: pane.id,
+                                is_plugin: pane.is_plugin,
+                                title: pane.title,
+                                focused: pane.focused,
+                                contents: pane.contents,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    impl From<SavedSessionPreview> for pb::SavedSessionPreviewPayload {
+        fn from(p: SavedSessionPreview) -> Self {
+            pb::SavedSessionPreviewPayload {
+                session_name: p.session_name,
+                folder: p.folder,
+                tabs: p
+                    .tabs
+                    .into_iter()
+                    .map(|t| pb::SavedTabPreview {
+                        name: t.name,
+                        focused: t.focused,
+                        panes: t
+                            .panes
+                            .into_iter()
+                            .map(|pane| pb::SavedPanePreview {
+                                title: pane.title,
+                                command: pane.command,
+                                cwd: pane.cwd,
+                                contents: pane.contents,
+                                focused: pane.focused,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                error: p.error,
+            }
+        }
+    }
+
+    impl From<pb::SavedSessionPreviewPayload> for SavedSessionPreview {
+        fn from(p: pb::SavedSessionPreviewPayload) -> Self {
+            SavedSessionPreview {
+                session_name: p.session_name,
+                folder: p.folder,
+                tabs: p
+                    .tabs
+                    .into_iter()
+                    .map(|t| SavedTabPreview {
+                        name: t.name,
+                        focused: t.focused,
+                        panes: t
+                            .panes
+                            .into_iter()
+                            .map(|pane| SavedPanePreview {
+                                title: pane.title,
+                                command: pane.command,
+                                cwd: pane.cwd,
+                                contents: pane.contents,
+                                focused: pane.focused,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                error: p.error,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::data::Event;
+        use crate::plugin_api::event::ProtobufEvent;
+        use std::convert::TryFrom;
+
+        fn round_trip(event: Event) {
+            let protobuf = ProtobufEvent::try_from(event.clone()).unwrap();
+            assert_eq!(Event::try_from(protobuf).unwrap(), event);
+        }
+
+        #[test]
+        fn session_suggestion_events_round_trip() {
+            let mut facts = std::collections::BTreeMap::new();
+            facts.insert("project".to_owned(), "zellij".to_owned());
+            round_trip(Event::SessionSuggestions(SessionSuggestions {
+                folder: Some("/a/".to_owned()),
+                branch: Some("main".to_owned()),
+                columns: vec![SessionSuggestionColumn {
+                    fact: "directory".to_owned(),
+                    title: "folder".to_owned(),
+                }],
+                suggestions: vec![SessionSuggestion {
+                    name: "s".to_owned(),
+                    is_running: true,
+                    last_used_secs_ago: 3,
+                    created_secs_ago: 9,
+                    folder: Some("/a/b/".to_owned()),
+                    folder_relation: FolderRelation::Subfolder,
+                    repo: None,
+                    branch: Some("main".to_owned()),
+                    facts,
+                    tier: Some(1),
+                    matching_columns: vec!["directory".to_owned()],
+                    script_label: Some("x".to_owned()),
+                    tabs: vec![crate::data::SessionPreviewTab {
+                        name: "editor".to_owned(),
+                        active: true,
+                        panes: vec![crate::data::SessionPreviewPane {
+                            id: 4,
+                            is_plugin: true,
+                            title: "session-manager".to_owned(),
+                            focused: true,
+                            contents: None,
+                        }],
+                    }],
+                    connected_clients: 2,
+                }],
+                command_submitted: true,
+                from_script: false,
+            }));
+            round_trip(Event::SessionCountsUpdate(SessionCounts {
+                running: 2,
+                resumable_matching: 1,
+            }));
+            round_trip(Event::FolderSessionsUpdate(FolderSessions {
+                folder: "/a/".to_owned(),
+                running: vec!["r".to_owned()],
+                resumable: vec!["s".to_owned()],
+                full_match_running: vec!["r".to_owned()],
+            }));
+            round_trip(Event::TerminalCommandSubmitted);
+            round_trip(Event::SessionPreview(SessionPreview {
+                session_name: "s".to_owned(),
+                tab_index: Some(1),
+                active_tab_index: Some(0),
+                tab_names: vec!["a".to_owned(), "b".to_owned()],
+                contents: "\u{1b}[31mred".to_owned(),
+                pane_count: 3,
+                connected_clients: 1,
+                error: None,
+                tabs: vec![crate::data::SessionPreviewTab {
+                    name: "a".to_owned(),
+                    active: false,
+                    panes: vec![crate::data::SessionPreviewPane {
+                        id: 1,
+                        is_plugin: false,
+                        title: "shell".to_owned(),
+                        focused: true,
+                        contents: Some("$ ls".to_owned()),
+                    }],
+                }],
+            }));
+            round_trip(Event::SavedSessionPreview(SavedSessionPreview {
+                session_name: "s".to_owned(),
+                folder: Some("/a".to_owned()),
+                tabs: vec![SavedTabPreview {
+                    name: "Tab #1".to_owned(),
+                    focused: true,
+                    panes: vec![SavedPanePreview {
+                        title: None,
+                        command: Some("htop".to_owned()),
+                        cwd: Some("/a".to_owned()),
+                        contents: Some("hello".to_owned()),
+                        focused: true,
+                    }],
+                }],
+                error: None,
+            }));
+        }
     }
 }
